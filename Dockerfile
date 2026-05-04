@@ -1,6 +1,8 @@
 FROM node:18-bullseye
 
-RUN apt-get update && apt-get install -y \
+# Added -o Acquire::Retries=3 to force apt to retry failed downloads automatically
+RUN apt-get -o Acquire::Retries=3 update && \
+    apt-get -o Acquire::Retries=3 install -y \
     ffmpeg \
     fonts-roboto \
     fonts-noto-color-emoji \
