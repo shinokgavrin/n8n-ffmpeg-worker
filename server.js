@@ -34,8 +34,8 @@ app.post('/render', async (req, res) => {
 
         console.log(`[Job ${jobId}] Video downloaded. Starting FFmpeg processing...`);
         
-        // Test filter to ensure Cyrillic and Emojis render correctly
-        const drawtextFilter = `drawtext=font='Roboto Bold':text='${textParams}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=(h-text_h)/2`;
+        // THE FIX: We now accept the exact, chained FFmpeg string that n8n sends us!
+        const drawtextFilter = textParams;
 
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
