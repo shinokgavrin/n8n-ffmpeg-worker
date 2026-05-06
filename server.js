@@ -10,26 +10,20 @@ const app = express();
 app.use(express.json());
 
 function renderSubtitleImage(text, outputPath) {
-    // FIX: Canvas widened to 1920 for 16:9 video
     const canvas = createCanvas(1920, 200); 
     const ctx = canvas.getContext('2d');
     
     ctx.font = 'bold 80px Roboto, "Noto Color Emoji"';
     
-    // Draw Background Plate
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    // FIX: Added the 1.2 multiplier to account for Cairo's emoji measurement quirks
     const textWidth = ctx.measureText(text).width * 1.2; 
     const padding = 40;
-    // FIX: Centered based on the new 1920 width
     const boxX = (1920 - textWidth) / 2 - padding;
     ctx.fillRect(boxX, 20, textWidth + (padding * 2), 160);
     
-    // Draw Text
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillStyle = 'white';
-    // FIX: Centered based on the new 1920 width
     ctx.fillText(text, 1920 / 2, 100); 
     
     const buffer = canvas.toBuffer('image/png');
@@ -63,13 +57,13 @@ app.post('/render', async (req, res) => {
             renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
             
-            ffmpegCommand = ffmpegCommand.input(imgPath);
-            
-            const currentImgIndex = i + 1;
+            // THE FIX: We no longer add the image as a primary input.
+            // We use the FFmpeg 'movie' filter to load it safely inside the graph!
+            const safeImgPath = imgPath.replace(/\\/g, '/'); // Ensure Linux path compatibility
+            const imgId = `img${i}`;
             const nextOutput = `v${i+1}`;
             
-            // FIX: Changed overlay to `y=H-h-150` which places the subtitles near the bottom of the screen
-            filterComplex += `[${lastOutput}][${currentImgIndex}:v]overlay=x=0:y=H-h-150:enable='between(t,${sub.start},${sub.end})'[${nextOutput}];`;
+            filterComplex += `movie='${safeImgPath}'[${imgId}];[${lastOutput}][${imgId}]overlay=x=0:y=H-h-150:enable='between(t,${sub.start},${sub.end})'[${nextOutput}];`;
             lastOutput = nextOutput;
         }
 
