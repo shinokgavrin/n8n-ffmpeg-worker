@@ -9,27 +9,24 @@ const { createCanvas } = require('canvas');
 const app = express();
 app.use(express.json());
 
-// Creates full-size 1920x1080 frames to perfectly match the video
 function renderSubtitleImage(text, outputPath) {
     const canvas = createCanvas(1920, 1080); 
     const ctx = canvas.getContext('2d');
     
-    // If the text is empty, just output a fully transparent frame
     if (!text || text.trim() === "") {
         fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
         return;
     }
     
+    // With canvas built from source, this will finally render in full color!
     ctx.font = 'bold 80px Roboto, "Noto Color Emoji"';
     
-    // Background Plate
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     const textWidth = ctx.measureText(text).width * 1.2; 
     const padding = 40;
     const boxX = (1920 - textWidth) / 2 - padding;
     ctx.fillRect(boxX, 800, textWidth + (padding * 2), 160);
     
-    // White Text & Emojis
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillStyle = 'white';
@@ -82,7 +79,6 @@ app.post('/render', async (req, res) => {
             currentTime = end;
         }
 
-        // THE FIX: Added final blank frame duration to prevent video truncation
         concatText += `file 'blank_${jobId}.png'\n`;
         concatText += `duration 1.00\n`;
         fs.writeFileSync(concatTxtPath, concatText);
@@ -93,13 +89,12 @@ app.post('/render', async (req, res) => {
             ffmpeg(inputPath)
                 .input(concatTxtPath)
                 .inputOptions(['-f', 'concat', '-safe', '0'])
-                // THE FIX: Explicitly labeled the output stream [outv]
                 .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
                 .outputOptions([
-                    '-map 0:a',          // THE FIX: explicitly map original audio
-                    '-c:a copy',         // copy audio without re-encoding
-                    '-c:v libx264',      // standard web-safe video codec
-                    '-pix_fmt yuv420p'   // web-safe pixel format
+                    '-map 0:a',          
+                    '-c:a copy',         
+                    '-c:v libx264',      
+                    '-pix_fmt yuv420p'   
                 ])
                 .save(outputPath)
                 .on('end', () => {
