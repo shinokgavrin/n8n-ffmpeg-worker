@@ -9,26 +9,33 @@ const { createCanvas } = require('canvas');
 const app = express();
 app.use(express.json());
 
-// Kept your sleek 1920x200 canvas
+// Creates full-size 1920x1080 frames to perfectly match the video
 function renderSubtitleImage(text, outputPath) {
-    const canvas = createCanvas(1920, 200); 
+    const canvas = createCanvas(1920, 1080); 
     const ctx = canvas.getContext('2d');
+    
+    // If the text is empty, just output a fully transparent frame
+    if (!text || text.trim() === "") {
+        fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
+        return;
+    }
     
     ctx.font = 'bold 80px Roboto, "Noto Color Emoji"';
     
+    // Background Plate
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     const textWidth = ctx.measureText(text).width * 1.2; 
     const padding = 40;
     const boxX = (1920 - textWidth) / 2 - padding;
-    ctx.fillRect(boxX, 20, textWidth + (padding * 2), 160);
+    ctx.fillRect(boxX, 800, textWidth + (padding * 2), 160);
     
+    // White Text & Emojis
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillStyle = 'white';
-    ctx.fillText(text, 1920 / 2, 100); 
+    ctx.fillText(text, 1920 / 2, 880); 
     
-    const buffer = canvas.toBuffer('image/png');
-    fs.writeFileSync(outputPath, buffer);
+    fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
 app.post('/render', async (req, res) => {
@@ -36,8 +43,10 @@ app.post('/render', async (req, res) => {
     const jobId = randomUUID();
     const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
     const outputPath = path.join(__dirname, `output_${jobId}.mp4`);
+    const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
+    const blankPath = path.join(__dirname, `blank_${jobId}.png`);
     
-    let generatedFiles = [inputPath, outputPath];
+    let generatedFiles = [inputPath, outputPath, concatTxtPath, blankPath];
 
     try {
         console.log(`[Job ${jobId}] Downloading video...`);
@@ -46,46 +55,52 @@ app.post('/render', async (req, res) => {
         response.data.pipe(writer);
         await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
 
-        console.log(`[Job ${jobId}] Creating subtitle images...`);
-        let ffmpegCommand = ffmpeg(inputPath);
-        let filterParts = [];
+        console.log(`[Job ${jobId}] Compiling subtitle track...`);
         
+        renderSubtitleImage("", blankPath);
+        let concatText = "ffconcat version 1.0\n";
+        let currentTime = 0;
+
         for (let i = 0; i < subtitles.length; i++) {
             const sub = subtitles[i];
-            const imgPath = path.join(__dirname, `sub_${jobId}_${i}.png`);
-            
+            const start = parseFloat(sub.start);
+            const end = parseFloat(sub.end);
+
+            if (start > currentTime) {
+                concatText += `file 'blank_${jobId}.png'\n`;
+                concatText += `duration ${(start - currentTime).toFixed(2)}\n`;
+            }
+
+            const imgName = `sub_${jobId}_${i}.png`;
+            const imgPath = path.join(__dirname, imgName);
             renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
-            
-            const duration = parseFloat(sub.end) - parseFloat(sub.start) + 0.1;
-            
-            // THE FIX: Loop the image so it behaves like a video stream!
-            ffmpegCommand = ffmpegCommand
-                .input(imgPath)
-                .inputOptions([
-                    '-loop 1',
-                    '-framerate 25',
-                    `-t ${duration}`
-                ]);
-            
-            const idx = i + 1;
-            const prevLabel = i === 0 ? '0:v' : `v${i}`;
-            const nextLabel = `v${i + 1}`;
-            
-            // THE FIX: Use setpts to align timestamps, and eof_action=pass to clear the screen
-            filterParts.push(
-                `[${idx}:v]setpts=PTS+${sub.start}/TB[img${idx}]`,
-                `[${prevLabel}][img${idx}]overlay=x=0:y=H-h-150:shortest=0:eof_action=pass[${nextLabel}]`
-            );
+
+            concatText += `file '${imgName}'\n`;
+            concatText += `duration ${(end - start).toFixed(2)}\n`;
+
+            currentTime = end;
         }
 
-        const filterComplex = filterParts.join(';');
+        // THE FIX: Added final blank frame duration to prevent video truncation
+        concatText += `file 'blank_${jobId}.png'\n`;
+        concatText += `duration 1.00\n`;
+        fs.writeFileSync(concatTxtPath, concatText);
 
-        console.log(`[Job ${jobId}] Starting FFmpeg composite (Timestamp Method)...`);
+        console.log(`[Job ${jobId}] Starting FFmpeg composite...`);
+        
         await new Promise((resolve, reject) => {
-            ffmpegCommand
-                .complexFilter(filterComplex, `v${subtitles.length}`)
-                .outputOptions('-c:a copy')
+            ffmpeg(inputPath)
+                .input(concatTxtPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                // THE FIX: Explicitly labeled the output stream [outv]
+                .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
+                .outputOptions([
+                    '-map 0:a',          // THE FIX: explicitly map original audio
+                    '-c:a copy',         // copy audio without re-encoding
+                    '-c:v libx264',      // standard web-safe video codec
+                    '-pix_fmt yuv420p'   // web-safe pixel format
+                ])
                 .save(outputPath)
                 .on('end', () => {
                     console.log(`[Job ${jobId}] Success. Sending file...`);
