@@ -1,12 +1,18 @@
-FROM node:18-bullseye
+# Upgraded to 'bookworm' for modern Pango color emoji support!
+FROM node:18-bookworm
 
-# Added -o Acquire::Retries=3 to force apt to retry failed downloads automatically
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y \
     ffmpeg \
     fonts-roboto \
     fonts-noto-color-emoji \
     fontconfig \
+    build-essential \
+    libcairo2-dev \
+    libpango1.0-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
