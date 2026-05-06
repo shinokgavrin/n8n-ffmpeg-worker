@@ -9,6 +9,7 @@ const { createCanvas } = require('canvas');
 const app = express();
 app.use(express.json());
 
+// Kept your sleek 1920x200 canvas
 function renderSubtitleImage(text, outputPath) {
     const canvas = createCanvas(1920, 200); 
     const ctx = canvas.getContext('2d');
@@ -47,9 +48,8 @@ app.post('/render', async (req, res) => {
 
         console.log(`[Job ${jobId}] Creating subtitle images...`);
         let ffmpegCommand = ffmpeg(inputPath);
-        let filterComplex = '';
-        let lastOutput = '0:v';
-
+        let filterParts = [];
+        
         for (let i = 0; i < subtitles.length; i++) {
             const sub = subtitles[i];
             const imgPath = path.join(__dirname, `sub_${jobId}_${i}.png`);
@@ -57,22 +57,34 @@ app.post('/render', async (req, res) => {
             renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
             
-            // THE FIX: We no longer add the image as a primary input.
-            // We use the FFmpeg 'movie' filter to load it safely inside the graph!
-            const safeImgPath = imgPath.replace(/\\/g, '/'); // Ensure Linux path compatibility
-            const imgId = `img${i}`;
-            const nextOutput = `v${i+1}`;
+            const duration = parseFloat(sub.end) - parseFloat(sub.start) + 0.1;
             
-            filterComplex += `movie='${safeImgPath}'[${imgId}];[${lastOutput}][${imgId}]overlay=x=0:y=H-h-150:enable='between(t,${sub.start},${sub.end})'[${nextOutput}];`;
-            lastOutput = nextOutput;
+            // THE FIX: Loop the image so it behaves like a video stream!
+            ffmpegCommand = ffmpegCommand
+                .input(imgPath)
+                .inputOptions([
+                    '-loop 1',
+                    '-framerate 25',
+                    `-t ${duration}`
+                ]);
+            
+            const idx = i + 1;
+            const prevLabel = i === 0 ? '0:v' : `v${i}`;
+            const nextLabel = `v${i + 1}`;
+            
+            // THE FIX: Use setpts to align timestamps, and eof_action=pass to clear the screen
+            filterParts.push(
+                `[${idx}:v]setpts=PTS+${sub.start}/TB[img${idx}]`,
+                `[${prevLabel}][img${idx}]overlay=x=0:y=H-h-150:shortest=0:eof_action=pass[${nextLabel}]`
+            );
         }
 
-        if (filterComplex.endsWith(';')) filterComplex = filterComplex.slice(0, -1);
+        const filterComplex = filterParts.join(';');
 
-        console.log(`[Job ${jobId}] Starting FFmpeg composite...`);
+        console.log(`[Job ${jobId}] Starting FFmpeg composite (Timestamp Method)...`);
         await new Promise((resolve, reject) => {
             ffmpegCommand
-                .complexFilter(filterComplex, lastOutput)
+                .complexFilter(filterComplex, `v${subtitles.length}`)
                 .outputOptions('-c:a copy')
                 .save(outputPath)
                 .on('end', () => {
