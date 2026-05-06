@@ -4,12 +4,47 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createCanvas } = require('canvas');
+const { execSync } = require('child_process');
+// IMPORT LOADIMAGE: Needed to download the emoji graphic from the internet
+const { createCanvas, loadImage } = require('canvas'); 
 
 const app = express();
 app.use(express.json());
 
-function renderSubtitleImage(text, outputPath) {
+// --- DEBUG ENDPOINT ---
+app.get('/debug', (req, res) => {
+    const info = {};
+    try { info.emojiFont = execSync('fc-list | grep -i emoji').toString().trim(); } 
+    catch(e) { info.emojiFont = 'NOT FOUND: ' + e.message; }
+    try { info.freetype = execSync('dpkg -l libfreetype6 | tail -1').toString().trim(); }
+    catch(e) { info.freetype = 'unknown: ' + e.message; }
+    try { info.cairo = execSync('dpkg -l libcairo2 | tail -1').toString().trim(); }
+    catch(e) { info.cairo = 'unknown: ' + e.message; }
+    
+    console.log("=== SYSTEM DIAGNOSTICS ===");
+    console.log(JSON.stringify(info, null, 2));
+    
+    try {
+        const canvas = createCanvas(400, 100);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#333';
+        ctx.fillRect(0, 0, 400, 100);
+        ctx.font = 'bold 60px Roboto';
+        ctx.fillStyle = 'white';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Test Text', 10, 50);
+        const buffer = canvas.toBuffer('image/png');
+        res.set('Content-Type', 'image/png');
+        return res.send(buffer);
+    } catch(e) {
+        info.canvasError = e.message;
+        return res.json(info);
+    }
+});
+
+// --- SUBTITLE RENDERER (THE TWEMOJI OVERRIDE) ---
+// Note: This is now an async function because it downloads an image
+async function renderSubtitleImage(text, outputPath) {
     const canvas = createCanvas(1920, 1080); 
     const ctx = canvas.getContext('2d');
     
@@ -18,23 +53,72 @@ function renderSubtitleImage(text, outputPath) {
         return;
     }
     
-    // With canvas built from source, this will finally render in full color!
-    ctx.font = 'bold 80px Roboto, "Noto Color Emoji"';
-    
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    const textWidth = ctx.measureText(text).width * 1.2; 
-    const padding = 40;
-    const boxX = (1920 - textWidth) / 2 - padding;
-    ctx.fillRect(boxX, 800, textWidth + (padding * 2), 160);
-    
+    // We only need Roboto now. No more color font fallbacks!
+    ctx.font = 'bold 80px Roboto'; 
     ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'white';
-    ctx.fillText(text, 1920 / 2, 880); 
+
+    // 1. Separate the text and the emoji using a Unicode Regex
+    const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
+    let emojis = [];
+    let cleanText = text;
+    let match;
+
+    while ((match = emojiRegex.exec(text)) !== null) {
+        emojis.push(match[0]);
+        cleanText = cleanText.replace(match[0], ''); 
+    }
+    cleanText = cleanText.trim();
+
+    // 2. Measure everything to keep the dark plate perfectly centered
+    const textWidth = ctx.measureText(cleanText).width;
+    const emojiSize = 80;
+    const spacing = emojis.length > 0 ? 25 : 0; 
+    const totalWidth = textWidth + spacing + (emojis.length > 0 ? emojiSize : 0);
+
+    const padding = 40;
+    const startX = (1920 - totalWidth) / 2;
+    const boxX = startX - padding;
     
+    // 3. Draw Background Plate
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(boxX, 800, totalWidth + (padding * 2), 160);
+    
+    // 4. Draw White Text (if any text remains)
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'left';
+    if (cleanText.length > 0) {
+        ctx.fillText(cleanText, startX, 880); 
+    }
+    
+    // 5. Draw the Full-Color Emoji from Twitter's CDN
+    if (emojis.length > 0) {
+        const emojiChar = emojis[0]; 
+        // Convert the emoji to its hex code point so we can look it up
+        let codePoint = emojiChar.codePointAt(0).toString(16);
+        
+        // Handle complex emojis (like ones with variations or genders)
+        if (emojiChar.length > 2) {
+             const points = [];
+             for (const cp of emojiChar) points.push(cp.codePointAt(0).toString(16));
+             codePoint = points.filter(p => p !== 'fe0f').join('-'); // Strip variation selector
+        }
+
+        const twemojiUrl = `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/${codePoint}.png`;
+
+        try {
+            const image = await loadImage(twemojiUrl);
+            // Draw it perfectly aligned to the right of the text
+            const emojiX = cleanText.length > 0 ? startX + textWidth + spacing : startX;
+            ctx.drawImage(image, emojiX, 880 - (emojiSize / 2), emojiSize, emojiSize);
+        } catch (err) {
+            console.error(`[Warning] Could not load emoji graphic from: ${twemojiUrl}`);
+        }
+    }
+
     fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
+// --- FFmpeg RENDER PIPELINE ---
 app.post('/render', async (req, res) => {
     const { videoUrl, subtitles } = req.body; 
     const jobId = randomUUID();
@@ -54,7 +138,8 @@ app.post('/render', async (req, res) => {
 
         console.log(`[Job ${jobId}] Compiling subtitle track...`);
         
-        renderSubtitleImage("", blankPath);
+        // AWAIT added because renderSubtitleImage is now an async function
+        await renderSubtitleImage("", blankPath);
         let concatText = "ffconcat version 1.0\n";
         let currentTime = 0;
 
@@ -70,7 +155,9 @@ app.post('/render', async (req, res) => {
 
             const imgName = `sub_${jobId}_${i}.png`;
             const imgPath = path.join(__dirname, imgName);
-            renderSubtitleImage(sub.text, imgPath);
+            
+            // AWAIT added here as well
+            await renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
 
             concatText += `file '${imgName}'\n`;
@@ -109,7 +196,7 @@ app.post('/render', async (req, res) => {
         if (!res.headersSent) res.status(500).json({ error: 'Processing failed', details: error.message });
     } finally {
         console.log(`[Job ${jobId}] Cleaning up ${generatedFiles.length} files...`);
-        generatedFiles.forEach(file => { if (fs.existsSync(file)) fs.unlinkSync(file); });
+        generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
     }
 });
 
