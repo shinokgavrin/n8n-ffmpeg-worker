@@ -43,9 +43,8 @@ app.get('/debug', (req, res) => {
 });
 
 // --- SUBTITLE RENDERER (THE TWEMOJI OVERRIDE) ---
-// Note: This is now an async function because it downloads an image
 async function renderSubtitleImage(text, outputPath) {
-    // Canvas is now natively vertical (1080x1920)
+    // Canvas is natively vertical (1080x1920)
     const canvas = createCanvas(1080, 1920); 
     const ctx = canvas.getContext('2d');
     
@@ -54,11 +53,9 @@ async function renderSubtitleImage(text, outputPath) {
         return;
     }
     
-    // We only need Roboto now. No more color font fallbacks!
-    ctx.font = 'bold 80px Roboto'; 
     ctx.textBaseline = 'middle';
 
-    // 1. Separate the text and the emoji using a Unicode Regex
+    // 1. Separate the text and the emoji
     const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
     let emojis = [];
     let cleanText = text;
@@ -70,50 +67,73 @@ async function renderSubtitleImage(text, outputPath) {
     }
     cleanText = cleanText.trim();
 
-    // 2. Measure everything to keep the dark plate perfectly centered
+    // 2. Measure everything for perfect centering
+    ctx.font = 'bold 80px Roboto'; // Base font for measurement
     const textWidth = ctx.measureText(cleanText).width;
     const emojiSize = 80;
     const spacing = emojis.length > 0 ? 25 : 0; 
     const totalWidth = textWidth + spacing + (emojis.length > 0 ? emojiSize : 0);
 
     const padding = 40;
-    // Centering math now uses 1080 width
     const startX = (1080 - totalWidth) / 2;
     const boxX = startX - padding;
     
-    // 3. Draw Background Plate - Moved down to 1400 (lower third of vertical video)
+    // 3. Draw Background Plate (Lower third: Y=1400)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.fillRect(boxX, 1400, totalWidth + (padding * 2), 160);
     
-    // 4. Draw White Text - Moved down to 1480
-    ctx.fillStyle = 'white';
+    // 4. Draw Text with Forced Boldness (Stroke Method)
     ctx.textAlign = 'left';
+    ctx.lineJoin = 'round'; // Makes thick outlines look smooth
+    
     if (cleanText.length > 0) {
-        ctx.fillText(cleanText, startX, 1480); 
+        let currentCursorX = startX;
+
+        for (let i = 0; i < cleanText.length; i++) {
+            const char = cleanText[i];
+            const isUpper = char === char.toUpperCase() && char !== char.toLowerCase();
+
+            if (isUpper) {
+                ctx.fillStyle = '#FFD700';       // Yellow fill for Capitals
+                ctx.strokeStyle = 'black';       // Black outline
+                ctx.font = 'bold 90px Roboto';   // Slightly larger font
+            } else {
+                ctx.fillStyle = 'white';         // White fill for lowercase
+                ctx.strokeStyle = 'black';       // Black outline
+                ctx.font = 'bold 80px Roboto';   // Standard font
+            }
+
+            // BOLDNESS THICKNESS: Increase this number for thicker borders!
+            ctx.lineWidth = 8; 
+            
+            // Draw the thick outline first, then fill the center
+            ctx.strokeText(char, currentCursorX, 1480);
+            ctx.fillText(char, currentCursorX, 1480);
+            
+            // Move cursor forward
+            currentCursorX += ctx.measureText(char).width;
+        }
     }
     
-    // 5. Draw the Full-Color Emoji from Twitter's CDN - Moved down to 1480
+    // 5. Draw the Full-Color Emoji
     if (emojis.length > 0) {
         const emojiChar = emojis[0]; 
-        // Convert the emoji to its hex code point so we can look it up
         let codePoint = emojiChar.codePointAt(0).toString(16);
         
-        // Handle complex emojis (like ones with variations or genders)
         if (emojiChar.length > 2) {
              const points = [];
              for (const cp of emojiChar) points.push(cp.codePointAt(0).toString(16));
-             codePoint = points.filter(p => p !== 'fe0f').join('-'); // Strip variation selector
+             codePoint = points.filter(p => p !== 'fe0f').join('-'); 
         }
 
         const twemojiUrl = `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/${codePoint}.png`;
 
         try {
             const image = await loadImage(twemojiUrl);
-            // Draw it perfectly aligned to the right of the text
             const emojiX = cleanText.length > 0 ? startX + textWidth + spacing : startX;
             ctx.drawImage(image, emojiX, 1480 - (emojiSize / 2), emojiSize, emojiSize);
         } catch (err) {
-            console.error(`[Warning] Could not load emoji graphic from: ${twemojiUrl}`);
+            console.error(`[Warning] Could not load emoji: ${twemojiUrl}`);
         }
     }
 
@@ -140,7 +160,6 @@ app.post('/render', async (req, res) => {
 
         console.log(`[Job ${jobId}] Compiling subtitle track...`);
         
-        // AWAIT added because renderSubtitleImage is now an async function
         await renderSubtitleImage("", blankPath);
         let concatText = "ffconcat version 1.0\n";
         let currentTime = 0;
@@ -158,7 +177,6 @@ app.post('/render', async (req, res) => {
             const imgName = `sub_${jobId}_${i}.png`;
             const imgPath = path.join(__dirname, imgName);
             
-            // AWAIT added here as well
             await renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
 
@@ -197,7 +215,7 @@ app.post('/render', async (req, res) => {
         console.error(`[Job ${jobId}] Error:`, error.message);
         if (!res.headersSent) res.status(500).json({ error: 'Processing failed', details: error.message });
     } finally {
-        console.log(`[Job ${jobId}] Cleaning up ${generatedFiles.length} files...`);
+        console.log(`[Job ${jobId}] Cleaning up files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
     }
 });
