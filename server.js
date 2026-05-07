@@ -45,7 +45,8 @@ app.get('/debug', (req, res) => {
 // --- SUBTITLE RENDERER (THE TWEMOJI OVERRIDE) ---
 // Note: This is now an async function because it downloads an image
 async function renderSubtitleImage(text, outputPath) {
-    const canvas = createCanvas(1920, 1080); 
+    // Canvas is now natively vertical (1080x1920)
+    const canvas = createCanvas(1080, 1920); 
     const ctx = canvas.getContext('2d');
     
     if (!text || text.trim() === "") {
@@ -76,21 +77,22 @@ async function renderSubtitleImage(text, outputPath) {
     const totalWidth = textWidth + spacing + (emojis.length > 0 ? emojiSize : 0);
 
     const padding = 40;
-    const startX = (1920 - totalWidth) / 2;
+    // Centering math now uses 1080 width
+    const startX = (1080 - totalWidth) / 2;
     const boxX = startX - padding;
     
-    // 3. Draw Background Plate
+    // 3. Draw Background Plate - Moved down to 1400 (lower third of vertical video)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.fillRect(boxX, 800, totalWidth + (padding * 2), 160);
+    ctx.fillRect(boxX, 1400, totalWidth + (padding * 2), 160);
     
-    // 4. Draw White Text (if any text remains)
+    // 4. Draw White Text - Moved down to 1480
     ctx.fillStyle = 'white';
     ctx.textAlign = 'left';
     if (cleanText.length > 0) {
-        ctx.fillText(cleanText, startX, 880); 
+        ctx.fillText(cleanText, startX, 1480); 
     }
     
-    // 5. Draw the Full-Color Emoji from Twitter's CDN
+    // 5. Draw the Full-Color Emoji from Twitter's CDN - Moved down to 1480
     if (emojis.length > 0) {
         const emojiChar = emojis[0]; 
         // Convert the emoji to its hex code point so we can look it up
@@ -109,7 +111,7 @@ async function renderSubtitleImage(text, outputPath) {
             const image = await loadImage(twemojiUrl);
             // Draw it perfectly aligned to the right of the text
             const emojiX = cleanText.length > 0 ? startX + textWidth + spacing : startX;
-            ctx.drawImage(image, emojiX, 880 - (emojiSize / 2), emojiSize, emojiSize);
+            ctx.drawImage(image, emojiX, 1480 - (emojiSize / 2), emojiSize, emojiSize);
         } catch (err) {
             console.error(`[Warning] Could not load emoji graphic from: ${twemojiUrl}`);
         }
