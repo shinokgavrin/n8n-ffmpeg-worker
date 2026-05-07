@@ -5,13 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { execSync } = require('child_process');
-// IMPORT LOADIMAGE: Needed to download the emoji graphic from the internet
 const { createCanvas, loadImage } = require('canvas'); 
 
 const app = express();
 app.use(express.json());
 
-// --- DEBUG ENDPOINT ---
 app.get('/debug', (req, res) => {
     const info = {};
     try { info.emojiFont = execSync('fc-list | grep -i emoji').toString().trim(); } 
@@ -42,9 +40,7 @@ app.get('/debug', (req, res) => {
     }
 });
 
-// --- SUBTITLE RENDERER (THE TWEMOJI OVERRIDE) ---
 async function renderSubtitleImage(text, outputPath) {
-    // Canvas is natively vertical (1080x1920)
     const canvas = createCanvas(1080, 1920); 
     const ctx = canvas.getContext('2d');
     
@@ -55,7 +51,6 @@ async function renderSubtitleImage(text, outputPath) {
     
     ctx.textBaseline = 'middle';
 
-    // 1. Separate the text and the emoji
     const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
     let emojis = [];
     let cleanText = text;
@@ -67,25 +62,31 @@ async function renderSubtitleImage(text, outputPath) {
     }
     cleanText = cleanText.trim();
 
-    // 2. Measure everything for perfect centering
-    ctx.font = 'bold 80px Roboto'; // Base font for measurement
-    const textWidth = ctx.measureText(cleanText).width;
+    // ACCURATE MEASUREMENT FIX: Pre-measure each letter with its exact font size
+    let trueTextWidth = 0;
+    for (let i = 0; i < cleanText.length; i++) {
+        const char = cleanText[i];
+        const isUpper = char === char.toUpperCase() && char !== char.toLowerCase();
+        ctx.font = isUpper ? 'bold 90px Roboto' : 'bold 80px Roboto';
+        trueTextWidth += ctx.measureText(char).width;
+    }
+
     const emojiSize = 80;
     const spacing = emojis.length > 0 ? 25 : 0; 
-    const totalWidth = textWidth + spacing + (emojis.length > 0 ? emojiSize : 0);
+    const totalWidth = trueTextWidth + spacing + (emojis.length > 0 ? emojiSize : 0);
 
     const padding = 40;
     const startX = (1080 - totalWidth) / 2;
     const boxX = startX - padding;
     
-    // 3. Draw Background Plate (Lower third: Y=1400)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.fillRect(boxX, 1400, totalWidth + (padding * 2), 160);
     
-    // 4. Draw Text with Forced Boldness (Stroke Method)
     ctx.textAlign = 'left';
-    ctx.lineJoin = 'round'; // Makes thick outlines look smooth
+    ctx.lineJoin = 'round'; 
     
+    let finalCursorX = startX;
+
     if (cleanText.length > 0) {
         let currentCursorX = startX;
 
@@ -94,28 +95,26 @@ async function renderSubtitleImage(text, outputPath) {
             const isUpper = char === char.toUpperCase() && char !== char.toLowerCase();
 
             if (isUpper) {
-                ctx.fillStyle = '#FFD700';       // Yellow fill for Capitals
-                ctx.strokeStyle = 'black';       // Black outline
-                ctx.font = 'bold 90px Roboto';   // Slightly larger font
+                ctx.fillStyle = '#FFD700';       
+                ctx.strokeStyle = 'black';       
+                ctx.font = 'bold 90px Roboto';   
             } else {
-                ctx.fillStyle = 'white';         // White fill for lowercase
-                ctx.strokeStyle = 'black';       // Black outline
-                ctx.font = 'bold 80px Roboto';   // Standard font
+                ctx.fillStyle = 'white';         
+                ctx.strokeStyle = 'black';       
+                ctx.font = 'bold 80px Roboto';   
             }
 
-            // BOLDNESS THICKNESS: Increase this number for thicker borders!
             ctx.lineWidth = 8; 
             
-            // Draw the thick outline first, then fill the center
             ctx.strokeText(char, currentCursorX, 1480);
             ctx.fillText(char, currentCursorX, 1480);
             
-            // Move cursor forward
             currentCursorX += ctx.measureText(char).width;
         }
+        // Save the exact pixel where the text ended
+        finalCursorX = currentCursorX;
     }
     
-    // 5. Draw the Full-Color Emoji
     if (emojis.length > 0) {
         const emojiChar = emojis[0]; 
         let codePoint = emojiChar.codePointAt(0).toString(16);
@@ -130,7 +129,8 @@ async function renderSubtitleImage(text, outputPath) {
 
         try {
             const image = await loadImage(twemojiUrl);
-            const emojiX = cleanText.length > 0 ? startX + textWidth + spacing : startX;
+            // Drop the emoji exactly after the finalCursorX
+            const emojiX = cleanText.length > 0 ? finalCursorX + spacing : startX;
             ctx.drawImage(image, emojiX, 1480 - (emojiSize / 2), emojiSize, emojiSize);
         } catch (err) {
             console.error(`[Warning] Could not load emoji: ${twemojiUrl}`);
@@ -140,7 +140,6 @@ async function renderSubtitleImage(text, outputPath) {
     fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
-// --- FFmpeg RENDER PIPELINE ---
 app.post('/render', async (req, res) => {
     const { videoUrl, subtitles } = req.body; 
     const jobId = randomUUID();
