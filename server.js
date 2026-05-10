@@ -152,10 +152,35 @@ app.post('/render', async (req, res) => {
 
     try {
         console.log(`[Job ${jobId}] Downloading video...`);
-        const response = await axios({ url: videoUrl, responseType: 'stream', timeout: 30000 });
-        const writer = fs.createWriteStream(inputPath);
-        response.data.pipe(writer);
-        await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+        let attempts = 0;
+        const maxAttempts = 8;
+        
+        // --- NEW RETRY LOGIC START ---
+        while (attempts < maxAttempts) {
+            try {
+                const response = await axios({
+                    url: videoUrl,
+                    responseType: 'stream',
+                    timeout: 45000
+                });
+                const writer = fs.createWriteStream(inputPath);
+                response.data.pipe(writer);
+                await new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+                break; // success
+            } catch (err) {
+                attempts++;
+                if (err.response?.status === 423 && attempts < maxAttempts) {
+                    console.log(`[Job ${jobId}] Cloudinary 423 - waiting ${attempts * 3}s before retry...`);
+                    await new Promise(r => setTimeout(r, attempts * 3000));
+                    continue;
+                }
+                throw err; // real error
+            }
+        }
+        // --- NEW RETRY LOGIC END ---
 
         console.log(`[Job ${jobId}] Compiling subtitle track...`);
         
