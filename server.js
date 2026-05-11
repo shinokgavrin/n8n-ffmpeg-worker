@@ -11,12 +11,10 @@ const app = express();
 app.use(express.json());
 
 app.get('/debug', (req, res) => {
-    // ... (Keep your existing debug route exactly as is)
-    res.send("Debug route active");
+    res.send("Debug active");
 });
 
 async function renderSubtitleImage(text, outputPath) {
-    // ... (Keep your existing canvas rendering logic exactly as is)
     const canvas = createCanvas(1080, 1920); 
     const ctx = canvas.getContext('2d');
     
@@ -105,7 +103,6 @@ async function renderSubtitleImage(text, outputPath) {
 }
 
 app.post('/render', async (req, res) => {
-    // GRAB THE NEW keep_segments ARRAY FROM N8N
     const { videoUrl, subtitles, keep_segments } = req.body; 
     const jobId = randomUUID();
     
@@ -113,10 +110,9 @@ app.post('/render', async (req, res) => {
     const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
     const finalPath = path.join(__dirname, `final_${jobId}.mp4`);
     const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
-    const cutTxtPath = path.join(__dirname, `cutlist_${jobId}.txt`);
     const blankPath = path.join(__dirname, `blank_${jobId}.png`);
     
-    let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, cutTxtPath, blankPath];
+    let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
         console.log(`[Job ${jobId}] Downloading video...`);
@@ -133,7 +129,7 @@ app.post('/render', async (req, res) => {
             } catch (err) {
                 attempts++;
                 if (err.response?.status === 423 && attempts < maxAttempts) {
-                    console.log(`[Job ${jobId}] Cloudinary 423 - waiting ${attempts * 3}s before retry...`);
+                    console.log(`[Job ${jobId}] Cloudinary 423 - waiting ${attempts * 3}s...`);
                     await new Promise(r => setTimeout(r, attempts * 3000));
                     continue;
                 }
@@ -142,7 +138,6 @@ app.post('/render', async (req, res) => {
         }
 
         console.log(`[Job ${jobId}] Compiling subtitle track...`);
-        
         await renderSubtitleImage("", blankPath);
         let concatText = "ffconcat version 1.0\n";
         let currentTime = 0;
@@ -159,57 +154,57 @@ app.post('/render', async (req, res) => {
 
             const imgName = `sub_${jobId}_${i}.png`;
             const imgPath = path.join(__dirname, imgName);
-            
             await renderSubtitleImage(sub.text, imgPath);
             generatedFiles.push(imgPath);
 
             concatText += `file '${imgName}'\n`;
             concatText += `duration ${(end - start).toFixed(2)}\n`;
-
             currentTime = end;
         }
 
-        concatText += `file 'blank_${jobId}.png'\n`;
-        concatText += `duration 1.00\n`;
+        concatText += `file 'blank_${jobId}.png'\nduration 1.00\n`;
         fs.writeFileSync(concatTxtPath, concatText);
 
         console.log(`[Job ${jobId}] Phase 1: Burning subtitles onto video...`);
-        
-        // SAVE TO burnedPath INSTEAD OF outputPath
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
                 .input(concatTxtPath)
                 .inputOptions(['-f', 'concat', '-safe', '0'])
                 .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                .outputOptions([
-                    '-map 0:a',          
-                    '-c:a copy',         
-                    '-c:v libx264',      
-                    '-pix_fmt yuv420p'   
-                ])
+                .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p'])
                 .save(burnedPath)
                 .on('end', resolve)
                 .on('error', reject);
         });
 
-        // --- PHASE 2: AUTOMATIC JUMP CUTS ---
+        // --- PHASE 2: FRAME-ACCURATE JUMP CUTS ---
         if (keep_segments && keep_segments.length > 0) {
-            console.log(`[Job ${jobId}] Phase 2: Performing jump cuts...`);
+            console.log(`[Job ${jobId}] Phase 2: Performing precision jump cuts...`);
             
-            let cutText = "ffconcat version 1.0\n";
-            for (let seg of keep_segments) {
-                cutText += `file 'burned_${jobId}.mp4'\n`;
-                cutText += `inpoint ${seg.start}\n`;
-                cutText += `outpoint ${seg.end}\n`;
+            let filterComplex = '';
+            let concatInputs = '';
+            
+            // Build the exact frame trims for video and audio
+            for (let i = 0; i < keep_segments.length; i++) {
+                const seg = keep_segments[i];
+                filterComplex += `[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]; `;
+                filterComplex += `[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]; `;
+                concatInputs += `[v${i}][a${i}]`;
             }
-            fs.writeFileSync(cutTxtPath, cutText);
+            
+            // Stitch them all together perfectly
+            filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
-                ffmpeg()
-                    .input(cutTxtPath)
-                    .inputOptions(['-f', 'concat', '-safe', '0'])
-                    // -c copy is the secret sauce: it splices the video instantly without re-encoding!
-                    .outputOptions(['-c copy']) 
+                ffmpeg(burnedPath)
+                    .complexFilter(filterComplex, ['outv', 'outa'])
+                    .outputOptions([
+                        '-map [outv]',
+                        '-map [outa]',
+                        '-c:v libx264',  // Must re-encode to enforce the perfect cuts
+                        '-pix_fmt yuv420p',
+                        '-c:a aac'
+                    ])
                     .save(finalPath)
                     .on('end', () => {
                         console.log(`[Job ${jobId}] Success. Sending edited file...`);
@@ -218,7 +213,6 @@ app.post('/render', async (req, res) => {
                     .on('error', reject);
             });
         } else {
-            // Failsafe: If no cuts were detected, just send the burned video
             console.log(`[Job ${jobId}] No cuts needed. Sending burned file...`);
             res.download(burnedPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
         }
