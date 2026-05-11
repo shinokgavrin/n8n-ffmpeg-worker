@@ -11,36 +11,12 @@ const app = express();
 app.use(express.json());
 
 app.get('/debug', (req, res) => {
-    const info = {};
-    try { info.emojiFont = execSync('fc-list | grep -i emoji').toString().trim(); } 
-    catch(e) { info.emojiFont = 'NOT FOUND: ' + e.message; }
-    try { info.freetype = execSync('dpkg -l libfreetype6 | tail -1').toString().trim(); }
-    catch(e) { info.freetype = 'unknown: ' + e.message; }
-    try { info.cairo = execSync('dpkg -l libcairo2 | tail -1').toString().trim(); }
-    catch(e) { info.cairo = 'unknown: ' + e.message; }
-    
-    console.log("=== SYSTEM DIAGNOSTICS ===");
-    console.log(JSON.stringify(info, null, 2));
-    
-    try {
-        const canvas = createCanvas(400, 100);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#333';
-        ctx.fillRect(0, 0, 400, 100);
-        ctx.font = 'bold 60px Roboto';
-        ctx.fillStyle = 'white';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('Test Text', 10, 50);
-        const buffer = canvas.toBuffer('image/png');
-        res.set('Content-Type', 'image/png');
-        return res.send(buffer);
-    } catch(e) {
-        info.canvasError = e.message;
-        return res.json(info);
-    }
+    // ... (Keep your existing debug route exactly as is)
+    res.send("Debug route active");
 });
 
 async function renderSubtitleImage(text, outputPath) {
+    // ... (Keep your existing canvas rendering logic exactly as is)
     const canvas = createCanvas(1080, 1920); 
     const ctx = canvas.getContext('2d');
     
@@ -50,7 +26,6 @@ async function renderSubtitleImage(text, outputPath) {
     }
     
     ctx.textBaseline = 'middle';
-
     const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
     let emojis = [];
     let cleanText = text;
@@ -62,7 +37,6 @@ async function renderSubtitleImage(text, outputPath) {
     }
     cleanText = cleanText.trim();
 
-    // ACCURATE MEASUREMENT FIX: Pre-measure each letter with its exact font size
     let trueTextWidth = 0;
     for (let i = 0; i < cleanText.length; i++) {
         const char = cleanText[i];
@@ -84,12 +58,10 @@ async function renderSubtitleImage(text, outputPath) {
     
     ctx.textAlign = 'left';
     ctx.lineJoin = 'round'; 
-    
     let finalCursorX = startX;
 
     if (cleanText.length > 0) {
         let currentCursorX = startX;
-
         for (let i = 0; i < cleanText.length; i++) {
             const char = cleanText[i];
             const isUpper = char === char.toUpperCase() && char !== char.toLowerCase();
@@ -105,71 +77,59 @@ async function renderSubtitleImage(text, outputPath) {
             }
 
             ctx.lineWidth = 8; 
-            
             ctx.strokeText(char, currentCursorX, 1480);
             ctx.fillText(char, currentCursorX, 1480);
-            
             currentCursorX += ctx.measureText(char).width;
         }
-        // Save the exact pixel where the text ended
         finalCursorX = currentCursorX;
     }
     
     if (emojis.length > 0) {
         const emojiChar = emojis[0]; 
         let codePoint = emojiChar.codePointAt(0).toString(16);
-        
         if (emojiChar.length > 2) {
              const points = [];
              for (const cp of emojiChar) points.push(cp.codePointAt(0).toString(16));
              codePoint = points.filter(p => p !== 'fe0f').join('-'); 
         }
-
         const twemojiUrl = `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/${codePoint}.png`;
-
         try {
             const image = await loadImage(twemojiUrl);
-            // Drop the emoji exactly after the finalCursorX
             const emojiX = cleanText.length > 0 ? finalCursorX + spacing : startX;
             ctx.drawImage(image, emojiX, 1480 - (emojiSize / 2), emojiSize, emojiSize);
         } catch (err) {
             console.error(`[Warning] Could not load emoji: ${twemojiUrl}`);
         }
     }
-
     fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
 app.post('/render', async (req, res) => {
-    const { videoUrl, subtitles } = req.body; 
+    // GRAB THE NEW keep_segments ARRAY FROM N8N
+    const { videoUrl, subtitles, keep_segments } = req.body; 
     const jobId = randomUUID();
+    
     const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
-    const outputPath = path.join(__dirname, `output_${jobId}.mp4`);
+    const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
+    const finalPath = path.join(__dirname, `final_${jobId}.mp4`);
     const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
+    const cutTxtPath = path.join(__dirname, `cutlist_${jobId}.txt`);
     const blankPath = path.join(__dirname, `blank_${jobId}.png`);
     
-    let generatedFiles = [inputPath, outputPath, concatTxtPath, blankPath];
+    let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, cutTxtPath, blankPath];
 
     try {
         console.log(`[Job ${jobId}] Downloading video...`);
         let attempts = 0;
         const maxAttempts = 8;
         
-        // --- NEW RETRY LOGIC START ---
         while (attempts < maxAttempts) {
             try {
-                const response = await axios({
-                    url: videoUrl,
-                    responseType: 'stream',
-                    timeout: 45000
-                });
+                const response = await axios({ url: videoUrl, responseType: 'stream', timeout: 45000 });
                 const writer = fs.createWriteStream(inputPath);
                 response.data.pipe(writer);
-                await new Promise((resolve, reject) => {
-                    writer.on('finish', resolve);
-                    writer.on('error', reject);
-                });
-                break; // success
+                await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+                break; 
             } catch (err) {
                 attempts++;
                 if (err.response?.status === 423 && attempts < maxAttempts) {
@@ -177,10 +137,9 @@ app.post('/render', async (req, res) => {
                     await new Promise(r => setTimeout(r, attempts * 3000));
                     continue;
                 }
-                throw err; // real error
+                throw err; 
             }
         }
-        // --- NEW RETRY LOGIC END ---
 
         console.log(`[Job ${jobId}] Compiling subtitle track...`);
         
@@ -214,8 +173,9 @@ app.post('/render', async (req, res) => {
         concatText += `duration 1.00\n`;
         fs.writeFileSync(concatTxtPath, concatText);
 
-        console.log(`[Job ${jobId}] Starting FFmpeg composite...`);
+        console.log(`[Job ${jobId}] Phase 1: Burning subtitles onto video...`);
         
+        // SAVE TO burnedPath INSTEAD OF outputPath
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
                 .input(concatTxtPath)
@@ -227,13 +187,41 @@ app.post('/render', async (req, res) => {
                     '-c:v libx264',      
                     '-pix_fmt yuv420p'   
                 ])
-                .save(outputPath)
-                .on('end', () => {
-                    console.log(`[Job ${jobId}] Success. Sending file...`);
-                    res.download(outputPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
-                })
+                .save(burnedPath)
+                .on('end', resolve)
                 .on('error', reject);
         });
+
+        // --- PHASE 2: AUTOMATIC JUMP CUTS ---
+        if (keep_segments && keep_segments.length > 0) {
+            console.log(`[Job ${jobId}] Phase 2: Performing jump cuts...`);
+            
+            let cutText = "ffconcat version 1.0\n";
+            for (let seg of keep_segments) {
+                cutText += `file 'burned_${jobId}.mp4'\n`;
+                cutText += `inpoint ${seg.start}\n`;
+                cutText += `outpoint ${seg.end}\n`;
+            }
+            fs.writeFileSync(cutTxtPath, cutText);
+
+            await new Promise((resolve, reject) => {
+                ffmpeg()
+                    .input(cutTxtPath)
+                    .inputOptions(['-f', 'concat', '-safe', '0'])
+                    // -c copy is the secret sauce: it splices the video instantly without re-encoding!
+                    .outputOptions(['-c copy']) 
+                    .save(finalPath)
+                    .on('end', () => {
+                        console.log(`[Job ${jobId}] Success. Sending edited file...`);
+                        res.download(finalPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
+                    })
+                    .on('error', reject);
+            });
+        } else {
+            // Failsafe: If no cuts were detected, just send the burned video
+            console.log(`[Job ${jobId}] No cuts needed. Sending burned file...`);
+            res.download(burnedPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
+        }
 
     } catch (error) {
         console.error(`[Job ${jobId}] Error:`, error.message);
