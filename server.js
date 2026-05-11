@@ -184,7 +184,6 @@ app.post('/render', async (req, res) => {
             let filterComplex = '';
             let concatInputs = '';
             
-            // Build the exact frame trims for video and audio
             for (let i = 0; i < keep_segments.length; i++) {
                 const seg = keep_segments[i];
                 filterComplex += `[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]; `;
@@ -192,16 +191,15 @@ app.post('/render', async (req, res) => {
                 concatInputs += `[v${i}][a${i}]`;
             }
             
-            // Stitch them all together perfectly
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
                 ffmpeg(burnedPath)
+                    // fluent-ffmpeg handles the -map outputs natively here:
                     .complexFilter(filterComplex, ['outv', 'outa'])
                     .outputOptions([
-                        '-map [outv]',
-                        '-map [outa]',
-                        '-c:v libx264',  // Must re-encode to enforce the perfect cuts
+                        // Removed the duplicate manual -map lines that crashed FFmpeg!
+                        '-c:v libx264',  
                         '-pix_fmt yuv420p',
                         '-c:a aac'
                     ])
