@@ -137,45 +137,58 @@ app.post('/render', async (req, res) => {
             }
         }
 
-        console.log(`[Job ${jobId}] Compiling subtitle track...`);
-        await renderSubtitleImage("", blankPath);
-        let concatText = "ffconcat version 1.0\n";
-        let currentTime = 0;
+        // --- NEW OPTIMIZATION LOGIC ---
+        // Defaults to raw downloaded video for Phase 2 unless subtitles exist
+        let videoReadyForCutting = inputPath; 
+        const hasSubtitles = subtitles && Array.isArray(subtitles) && subtitles.length > 0;
 
-        for (let i = 0; i < subtitles.length; i++) {
-            const sub = subtitles[i];
-            const start = parseFloat(sub.start);
-            const end = parseFloat(sub.end);
+        if (hasSubtitles) {
+            console.log(`[Job ${jobId}] Compiling subtitle track...`);
+            await renderSubtitleImage("", blankPath);
+            let concatText = "ffconcat version 1.0\n";
+            let currentTime = 0;
 
-            if (start > currentTime) {
-                concatText += `file 'blank_${jobId}.png'\n`;
-                concatText += `duration ${(start - currentTime).toFixed(2)}\n`;
+            for (let i = 0; i < subtitles.length; i++) {
+                const sub = subtitles[i];
+                const start = parseFloat(sub.start);
+                const end = parseFloat(sub.end);
+
+                if (start > currentTime) {
+                    concatText += `file 'blank_${jobId}.png'\n`;
+                    concatText += `duration ${(start - currentTime).toFixed(2)}\n`;
+                }
+
+                const imgName = `sub_${jobId}_${i}.png`;
+                const imgPath = path.join(__dirname, imgName);
+                await renderSubtitleImage(sub.text, imgPath);
+                generatedFiles.push(imgPath);
+
+                concatText += `file '${imgName}'\n`;
+                concatText += `duration ${(end - start).toFixed(2)}\n`;
+                currentTime = end;
             }
 
-            const imgName = `sub_${jobId}_${i}.png`;
-            const imgPath = path.join(__dirname, imgName);
-            await renderSubtitleImage(sub.text, imgPath);
-            generatedFiles.push(imgPath);
+            concatText += `file 'blank_${jobId}.png'\nduration 1.00\n`;
+            fs.writeFileSync(concatTxtPath, concatText);
 
-            concatText += `file '${imgName}'\n`;
-            concatText += `duration ${(end - start).toFixed(2)}\n`;
-            currentTime = end;
+            console.log(`[Job ${jobId}] Phase 1: Burning subtitles onto video...`);
+            await new Promise((resolve, reject) => {
+                ffmpeg(inputPath)
+                    .input(concatTxtPath)
+                    .inputOptions(['-f', 'concat', '-safe', '0'])
+                    .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p'])
+                    .save(burnedPath)
+                    .on('end', resolve)
+                    .on('error', reject);
+            });
+            
+            // Phase 2 will now cut the video that has the burned subtitles
+            videoReadyForCutting = burnedPath; 
+            
+        } else {
+            console.log(`[Job ${jobId}] Phase 1 Skipped: No subtitles provided in JSON.`);
         }
-
-        concatText += `file 'blank_${jobId}.png'\nduration 1.00\n`;
-        fs.writeFileSync(concatTxtPath, concatText);
-
-        console.log(`[Job ${jobId}] Phase 1: Burning subtitles onto video...`);
-        await new Promise((resolve, reject) => {
-            ffmpeg(inputPath)
-                .input(concatTxtPath)
-                .inputOptions(['-f', 'concat', '-safe', '0'])
-                .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p'])
-                .save(burnedPath)
-                .on('end', resolve)
-                .on('error', reject);
-        });
 
         // --- PHASE 2: FRAME-ACCURATE JUMP CUTS ---
         if (keep_segments && keep_segments.length > 0) {
@@ -194,11 +207,9 @@ app.post('/render', async (req, res) => {
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
-                ffmpeg(burnedPath)
-                    // fluent-ffmpeg handles the -map outputs natively here:
+                ffmpeg(videoReadyForCutting) // Uses raw video if no subtitles, or burned video if subtitles exist
                     .complexFilter(filterComplex, ['outv', 'outa'])
                     .outputOptions([
-                        // Removed the duplicate manual -map lines that crashed FFmpeg!
                         '-c:v libx264',  
                         '-pix_fmt yuv420p',
                         '-c:a aac'
@@ -211,8 +222,8 @@ app.post('/render', async (req, res) => {
                     .on('error', reject);
             });
         } else {
-            console.log(`[Job ${jobId}] No cuts needed. Sending burned file...`);
-            res.download(burnedPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
+            console.log(`[Job ${jobId}] No cuts needed. Sending processed file...`);
+            res.download(videoReadyForCutting, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
         }
 
     } catch (error) {
