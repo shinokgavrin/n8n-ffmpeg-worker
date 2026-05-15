@@ -217,13 +217,22 @@ app.post('/render', async (req, res) => {
                     .save(finalPath)
                     .on('end', () => {
                         console.log(`[Job ${jobId}] Success. Sending edited file...`);
-                        res.download(finalPath, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
+                        res.download(finalPath, `final_video_${jobId}.mp4`, (err) => { 
+                            if (err) console.error(`[Job ${jobId}] Download error:`, err.message);
+                            resolve(); 
+                        });
                     })
                     .on('error', reject);
             });
         } else {
             console.log(`[Job ${jobId}] No cuts needed. Sending processed file...`);
-            res.download(videoReadyForCutting, `final_video_${jobId}.mp4`, (err) => { if (err) resolve(); resolve(); });
+            // THE FIX IS HERE: Wrapped in a Promise so 'resolve()' actually exists!
+            await new Promise((resolve) => {
+                res.download(videoReadyForCutting, `final_video_${jobId}.mp4`, (err) => { 
+                    if (err) console.error(`[Job ${jobId}] Download error:`, err.message);
+                    resolve(); 
+                });
+            });
         }
 
     } catch (error) {
