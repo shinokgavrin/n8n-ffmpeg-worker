@@ -10,9 +10,15 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v7 (Async Webhooks) is active!");
+    res.send("Multifunctional AI Video Worker v8 (Async Queue System) is active!");
 });
 
+// Глобальная система очереди
+const jobQueue = [];
+let isProcessing = false;
+
+// Вспомогательные функции (downloadFile, renderSubtitleImage, getVideoDuration) 
+// остаются без изменений
 async function downloadFile(url, dest, jobId = '') {
     let attempts = 0;
     const maxAttempts = 6;
@@ -105,15 +111,13 @@ function getVideoDuration(filePath) {
     });
 }
 
-app.post('/render', async (req, res) => {
-    const { videoUrl, subtitles, keep_segments, actions, webhookUrl } = req.body;
-    const jobId = randomUUID();
+// Главный воркер, который берет задачи из очереди
+async function processQueue() {
+    if (isProcessing || jobQueue.length === 0) return;
     
-    // 1. АСИНХРОННЫЙ ОТВЕТ (Спасает от 502 Bad Gateway)
-    res.status(202).json({ 
-        message: "Job accepted. Rendering in background...", 
-        jobId: jobId 
-    });
+    isProcessing = true;
+    const task = jobQueue.shift(); // Берем первую задачу
+    const { videoUrl, subtitles, keep_segments, actions, webhookUrl, jobId } = task;
 
     const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
     const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
@@ -125,11 +129,13 @@ app.post('/render', async (req, res) => {
     let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath, chunkListPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING V7 ASYNC CHUNKING RENDER ===`);
+        console.log(`\n[Job ${jobId}] === STARTING PROCESSING FROM QUEUE ===`);
+        console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
+        
         await downloadFile(videoUrl, inputPath, jobId);
         let currentVideo = inputPath;
 
-        // ========== PHASE 1: SUBTITLES ==========
+        // PHASE 1: SUBTITLES
         const hasSubtitles = subtitles && Array.isArray(subtitles) && subtitles.length > 0;
         if (hasSubtitles) {
             console.log(`[Job ${jobId}] Phase 1: Burning subtitles...`);
@@ -157,7 +163,7 @@ app.post('/render', async (req, res) => {
             currentVideo = burnedPath;
         }
 
-        // ========== PHASE 2: SMART CHUNKING ==========
+        // PHASE 2: SMART CHUNKING
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -186,7 +192,6 @@ app.post('/render', async (req, res) => {
                 chunks.push({ start, end });
             }
 
-            console.log(`[Job ${jobId}] Split timeline into ${chunks.length} manageable chunks.`);
             let chunkFiles = [], concatList = "ffconcat version 1.0\n";
 
             for (let i = 0; i < chunks.length; i++) {
@@ -257,7 +262,7 @@ app.post('/render', async (req, res) => {
                 concatList += `file '${path.basename(chunkOutputPath)}'\n`;
             }
 
-            console.log(`[Job ${jobId}] Phase 2: Concatenating chunks back together...`);
+            console.log(`[Job ${jobId}] Phase 2: Concatenating chunks...`);
             fs.writeFileSync(chunkListPath, concatList);
             const concatenatedPath = path.join(__dirname, `concatenated_${jobId}.mp4`);
             generatedFiles.push(concatenatedPath);
@@ -269,7 +274,7 @@ app.post('/render', async (req, res) => {
             currentVideo = concatenatedPath;
         }
 
-        // ========== PHASE 3: JUMP CUTS ==========
+        // PHASE 3: JUMP CUTS
         const hasCuts = keep_segments && Array.isArray(keep_segments) && keep_segments.length > 0;
         if (hasCuts) {
             console.log(`[Job ${jobId}] Phase 3: Performing jump cuts...`);
@@ -290,9 +295,9 @@ app.post('/render', async (req, res) => {
             currentVideo = finalPath;
         }
 
-        // ========== ФИНАЛ: ОТПРАВКА НА WEBHOOK ==========
+        // ОТПРАВКА НА WEBHOOK
         if (webhookUrl) {
-            console.log(`[Job ${jobId}] Sending final video to webhook: ${webhookUrl}`);
+            console.log(`[Job ${jobId}] Sending video to webhook: ${webhookUrl}`);
             const fileStream = fs.createReadStream(currentVideo);
             await axios.post(webhookUrl, fileStream, {
                 headers: { 'Content-Type': 'video/mp4' },
@@ -309,8 +314,30 @@ app.post('/render', async (req, res) => {
     } finally {
         console.log(`[Job ${jobId}] Cleaning up temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
+        
+        // Запускаем следующую задачу в очереди!
+        isProcessing = false;
+        processQueue();
     }
+}
+
+// Прием запросов от n8n
+app.post('/render', (req, res) => {
+    const jobId = randomUUID();
+    
+    // Сразу отвечаем, чтобы не было таймаутов (502)
+    res.status(202).json({ 
+        message: "Job added to queue. Rendering in background...", 
+        jobId: jobId 
+    });
+
+    // Кладем в очередь
+    jobQueue.push({ ...req.body, jobId });
+    console.log(`[System] Job ${jobId} added to queue. Position: ${jobQueue.length}`);
+    
+    // Пробуем запустить обработку
+    processQueue();
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Async Smart Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Async Queue Worker running on port ${PORT}`));
