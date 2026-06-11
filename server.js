@@ -10,15 +10,12 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v8 (Async Queue System) is active!");
+    res.send("Multifunctional AI Video Worker v10 (Stable Queue + No Chunking) is active!");
 });
 
-// Глобальная система очереди
 const jobQueue = [];
 let isProcessing = false;
 
-// Вспомогательные функции (downloadFile, renderSubtitleImage, getVideoDuration) 
-// остаются без изменений
 async function downloadFile(url, dest, jobId = '') {
     let attempts = 0;
     const maxAttempts = 6;
@@ -102,34 +99,24 @@ async function renderSubtitleImage(text, outputPath) {
     fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
-function getVideoDuration(filePath) {
-    return new Promise((resolve, reject) => {
-        ffmpeg.ffprobe(filePath, (err, metadata) => {
-            if (err) reject(err);
-            else resolve(metadata.format.duration);
-        });
-    });
-}
-
-// Главный воркер, который берет задачи из очереди
 async function processQueue() {
     if (isProcessing || jobQueue.length === 0) return;
     
     isProcessing = true;
-    const task = jobQueue.shift(); // Берем первую задачу
+    const task = jobQueue.shift(); 
     const { videoUrl, subtitles, keep_segments, actions, webhookUrl, jobId } = task;
 
     const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
     const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
+    const actionsPath = path.join(__dirname, `actions_${jobId}.mp4`);
     const finalPath = path.join(__dirname, `final_${jobId}.mp4`);
     const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
     const blankPath = path.join(__dirname, `blank_${jobId}.png`);
-    const chunkListPath = path.join(__dirname, `chunks_${jobId}.txt`);
     
-    let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath, chunkListPath];
+    let generatedFiles = [inputPath, burnedPath, actionsPath, finalPath, concatTxtPath, blankPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING PROCESSING FROM QUEUE ===`);
+        console.log(`\n[Job ${jobId}] === STARTING STABLE V10 PROCESSING ===`);
         console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -163,7 +150,7 @@ async function processQueue() {
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: SMART CHUNKING
+        // PHASE 2: SINGLE-PASS OVERLAYS (STABLE)
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -172,7 +159,9 @@ async function processQueue() {
         const hasEditorActions = muteActions.length > 0 || overlayActions.length > 0;
 
         if (hasEditorActions) {
-            console.log(`[Job ${jobId}] Phase 2: Analyzing timeline for Smart Chunking...`);
+            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets in a single stable pass...`);
+            
+            // Скачиваем ассеты
             for (let i = 0; i < overlayActions.length; i++) {
                 if (overlayActions[i].url) {
                     const ext = path.extname(overlayActions[i].asset_name || '').toLowerCase() || '.png';
@@ -184,94 +173,62 @@ async function processQueue() {
                 }
             }
 
-            const totalDuration = await getVideoDuration(currentVideo);
-            const CHUNK_DURATION = 120; 
-            let chunks = [];
-            for (let start = 0; start < totalDuration; start += CHUNK_DURATION) {
-                let end = Math.min(start + CHUNK_DURATION, totalDuration);
-                chunks.push({ start, end });
+            let command = ffmpeg(currentVideo).inputOptions(['-thread_queue_size', '4096']);
+
+            // Подаем файлы (без обрезки -t, самый стабильный метод)
+            overlayActions.forEach(action => {
+                if (action.localPath) {
+                    // Используем -ignore_loop 0 для GIF и -loop 1 для статики
+                    const loopOpt = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
+                    command.input(action.localPath).inputOptions([...loopOpt, '-thread_queue_size', '512']);
+                }
+            });
+
+            let complexFilters = [];
+            // Используем libx264 и ограничиваем потоки, чтобы не "порвать" сервер
+            let outputOptions = ['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-shortest', '-threads 4'];
+
+            if (muteActions.length > 0) {
+                const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
+                complexFilters.push(`[0:a]${volumeFilters}[outa]`);
+                outputOptions.push('-map [outa]');
+            } else {
+                outputOptions.push('-map 0:a');
             }
 
-            let chunkFiles = [], concatList = "ffconcat version 1.0\n";
+            if (overlayActions.length > 0) {
+                let currentVidNode = '[0:v]';
+                overlayActions.forEach((action, idx) => {
+                    const nextVidNode = idx === overlayActions.length - 1 ? '[outv]' : `[v${idx + 1}]`;
+                    const inputIdx = idx + 1;
+                    const scaledNode = `[scaled_v${idx + 1}]`;
+                    
+                    const MAX_W = parseInt(action.max_width) || 800;
+                    const MAX_H = parseInt(action.max_height) || 800;
+                    const startT = parseFloat(action.start_time);
+                    const endT = parseFloat(action.end_time);
 
-            for (let i = 0; i < chunks.length; i++) {
-                const chunk = chunks[i];
-                const chunkInputPath = path.join(__dirname, `chunk_raw_${jobId}_${i}.mp4`);
-                const chunkOutputPath = path.join(__dirname, `chunk_processed_${jobId}_${i}.mp4`);
-                generatedFiles.push(chunkInputPath, chunkOutputPath);
-
-                console.log(`[Job ${jobId}]    Processing Chunk ${i + 1}/${chunks.length} (${chunk.start}s - ${chunk.end}s)...`);
-
-                await new Promise((resolve, reject) => {
-                    ffmpeg(currentVideo).setStartTime(chunk.start).setDuration(chunk.end - chunk.start)
-                        .outputOptions(['-c:v copy', '-c:a copy']).save(chunkInputPath)
-                        .on('end', resolve).on('error', reject);
+                    complexFilters.push(`[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
+                    complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startT},${endT})':eof_action=pass${nextVidNode}`);
+                    
+                    currentVidNode = nextVidNode;
                 });
-
-                let chunkMutes = muteActions.filter(m => m.start_time < chunk.end && m.end_time > chunk.start);
-                let chunkOverlays = overlayActions.filter(o => o.start_time < chunk.end && o.end_time > chunk.start);
-
-                if (chunkMutes.length === 0 && chunkOverlays.length === 0) {
-                    chunkFiles.push(chunkInputPath);
-                    concatList += `file '${path.basename(chunkInputPath)}'\n`;
-                    continue;
-                }
-
-                let command = ffmpeg(chunkInputPath);
-                chunkOverlays.forEach(action => {
-                    if (action.localPath) command.input(action.localPath).inputOptions([action.isGif ? '-ignore_loop' : '-loop', action.isGif ? '0' : '1']);
-                });
-
-                let complexFilters = [];
-                let outputOptions = ['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-shortest'];
-
-                if (chunkMutes.length > 0) {
-                    const volumeFilters = chunkMutes.map(m => `volume=0:enable='between(t,${Math.max(0, m.start_time - chunk.start)},${Math.min(chunk.end - chunk.start, m.end_time - chunk.start)})'`).join(',');
-                    complexFilters.push(`[0:a]${volumeFilters}[outa]`);
-                    outputOptions.push('-map [outa]');
-                } else {
-                    outputOptions.push('-map 0:a');
-                }
-
-                if (chunkOverlays.length > 0) {
-                    let currentVidNode = '[0:v]';
-                    chunkOverlays.forEach((action, idx) => {
-                        const nextVidNode = idx === chunkOverlays.length - 1 ? '[outv]' : `[v${idx + 1}]`;
-                        const inputIdx = idx + 1, scaledNode = `[scaled_v${idx + 1}]`;
-                        const MAX_W = parseInt(action.max_width) || 800, MAX_H = parseInt(action.max_height) || 800;
-                        let localStart = Math.max(0, action.start_time - chunk.start);
-                        let localEnd = Math.min(chunk.end - chunk.start, action.end_time - chunk.start);
-
-                        complexFilters.push(`[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
-                        complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${localStart},${localEnd})'${nextVidNode}`);
-                        currentVidNode = nextVidNode;
-                    });
-                    outputOptions.push('-map [outv]');
-                } else {
-                    outputOptions.push('-map 0:v');
-                }
-
-                if (complexFilters.length > 0) command.complexFilter(complexFilters);
-                command.outputOptions(outputOptions);
-
-                await new Promise((resolve, reject) => {
-                    command.save(chunkOutputPath).on('end', resolve).on('error', (err) => reject(err));
-                });
-
-                chunkFiles.push(chunkOutputPath);
-                concatList += `file '${path.basename(chunkOutputPath)}'\n`;
+                outputOptions.push('-map [outv]');
+            } else {
+                outputOptions.push('-map 0:v');
             }
 
-            console.log(`[Job ${jobId}] Phase 2: Concatenating chunks...`);
-            fs.writeFileSync(chunkListPath, concatList);
-            const concatenatedPath = path.join(__dirname, `concatenated_${jobId}.mp4`);
-            generatedFiles.push(concatenatedPath);
+            if (complexFilters.length > 0) command.complexFilter(complexFilters);
+            command.outputOptions(outputOptions);
 
             await new Promise((resolve, reject) => {
-                ffmpeg().input(chunkListPath).inputOptions(['-f', 'concat', '-safe', '0'])
-                    .outputOptions(['-c', 'copy']).save(concatenatedPath).on('end', resolve).on('error', reject);
+                command.save(actionsPath)
+                    .on('end', () => { currentVideo = actionsPath; resolve(); })
+                    .on('error', (err, stdout, stderr) => {
+                        console.error(`[Job ${jobId}] FFmpeg error:`, err.message);
+                        reject(err);
+                    });
             });
-            currentVideo = concatenatedPath;
         }
 
         // PHASE 3: JUMP CUTS
@@ -315,29 +272,18 @@ async function processQueue() {
         console.log(`[Job ${jobId}] Cleaning up temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
         
-        // Запускаем следующую задачу в очереди!
         isProcessing = false;
-        processQueue();
+        processQueue(); // Запускаем следующую задачу в очереди
     }
 }
 
-// Прием запросов от n8n
 app.post('/render', (req, res) => {
     const jobId = randomUUID();
-    
-    // Сразу отвечаем, чтобы не было таймаутов (502)
-    res.status(202).json({ 
-        message: "Job added to queue. Rendering in background...", 
-        jobId: jobId 
-    });
-
-    // Кладем в очередь
+    res.status(202).json({ message: "Job added to queue. Rendering in background...", jobId: jobId });
     jobQueue.push({ ...req.body, jobId });
     console.log(`[System] Job ${jobId} added to queue. Position: ${jobQueue.length}`);
-    
-    // Пробуем запустить обработку
     processQueue();
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Async Queue Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Stable V10 Worker running on port ${PORT}`));
