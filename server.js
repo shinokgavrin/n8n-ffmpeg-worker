@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v11.1 (HQ Smart Layering) is active!");
+    res.send("Multifunctional AI Video Worker v13 (Safe Layering) is active!");
 });
 
 const jobQueue = [];
@@ -115,7 +115,7 @@ async function processQueue() {
     let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING V11.1 HQ SMART LAYERING ===`);
+        console.log(`\n[Job ${jobId}] === STARTING V13 SAFE LAYERING ===`);
         console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -149,7 +149,7 @@ async function processQueue() {
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: ITERATIVE HQ LAYERING
+        // PHASE 2: ITERATIVE SAFE LAYERING
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -158,7 +158,7 @@ async function processQueue() {
         const hasEditorActions = muteActions.length > 0 || overlayActions.length > 0;
 
         if (hasEditorActions) {
-            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets safely in HQ layered batches...`);
+            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets safely in MICRO-batches...`);
             
             for (let i = 0; i < overlayActions.length; i++) {
                 if (overlayActions[i].url) {
@@ -171,7 +171,8 @@ async function processQueue() {
                 }
             }
 
-            const BATCH_SIZE = 12;
+            // МАГИЯ СТАБИЛЬНОСТИ: Снижаем нагрузку, делая батчи по 6 элементов (вместо 12)
+            const BATCH_SIZE = 6;
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
 
             for (let b = 0; b < totalBatches; b++) {
@@ -192,15 +193,15 @@ async function processQueue() {
                 });
 
                 let complexFilters = [];
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads 4'];
+                // Ограничиваем потоки 3 ядрами, чтобы оставлять Railway пространство для маневра
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '3'];
 
-                // ОБНОВЛЕННАЯ МАГИЯ КАЧЕСТВА (CRF 14 + preset fast)
+                // МАГИЯ СЖАТИЯ: Более щадящие параметры
                 if (isLastBatch) {
-                    // Финальный проход: нормальное сжатие для адекватного размера файла
-                    outputOptions.push('-c:v libx264', '-crf 22', '-preset fast');
+                    outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
                 } else {
-                    // Промежуточные проходы: Visually Lossless
-                    outputOptions.push('-c:v libx264', '-crf 14', '-preset fast');
+                    // Используем CRF 16 (отличное качество, но меньше вес файла) и preset medium (стабильно)
+                    outputOptions.push('-c:v libx264', '-crf 16', '-preset medium');
                 }
 
                 if (b === 0) {
@@ -245,6 +246,9 @@ async function processQueue() {
 
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
+                
+                // Микро-пауза в 3 секунды, чтобы Railway успел сбросить графики нагрузки
+                await new Promise(r => setTimeout(r, 3000));
             }
         }
 
@@ -263,7 +267,7 @@ async function processQueue() {
 
             await new Promise((resolve, reject) => {
                 ffmpeg(currentVideo).complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-crf 22'])
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 3'])
                     .save(finalPath).on('end', resolve).on('error', reject);
             });
             currentVideo = finalPath;
@@ -303,4 +307,4 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`HQ Smart Layering Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Safe Layering Worker running on port ${PORT}`));
