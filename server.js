@@ -3,6 +3,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { randomUUID } = require('crypto');
 const { createCanvas, loadImage } = require('canvas');
 
@@ -10,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.2 (Deep Debugging) is active!");
+    res.send("Multifunctional AI Video Worker v13.3 (8-Core Optimized) is active!");
 });
 
 // Endpoint for checking server status
@@ -20,6 +21,7 @@ app.get('/status', (req, res) => {
         queueLength: jobQueue.length,
         isProcessing: isProcessing,
         uptime: process.uptime(),
+        cpuLoad1Min: os.loadavg()[0].toFixed(2),
         memoryUsageMB: {
             rss: (process.memoryUsage().rss / 1024 / 1024).toFixed(1),
             heapTotal: (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1),
@@ -131,10 +133,10 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.2 DEEP DEBUG RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.3 8-CORE RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
-        console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | Heap ${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB`);
+        console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
         console.log(`======================================================\n`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -163,7 +165,7 @@ async function processQueue() {
                 let command = ffmpeg(inputPath)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast']);
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 6']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err, stdout, stderr) => {
@@ -205,8 +207,8 @@ async function processQueue() {
                 }
             }
 
-            // OOM Prevention: Batch size lowered to 2
-            const BATCH_SIZE = 2; 
+            // Using 6 batch size - sufficient power to chew through them concurrently
+            const BATCH_SIZE = 6; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
@@ -217,9 +219,7 @@ async function processQueue() {
                 generatedFiles.push(batchOutputPath);
 
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
-                const memBefore = process.memoryUsage();
-                console.log(`[Job ${jobId}] RAM usage before batch: RSS ${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`);
-
+                
                 let command = ffmpeg(currentVideo);
 
                 batchOverlays.forEach(action => {
@@ -235,8 +235,8 @@ async function processQueue() {
                 });
 
                 let complexFilters = [];
-                // Thread throttling
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1'];
+                // Hard limit to 6 threads to protect 2 vCPUs for Railway Healthchecks/Node
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '6', '-filter_threads', '6'];
 
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
@@ -282,11 +282,11 @@ async function processQueue() {
                     command.on('start', (cmdLine) => {
                         console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
                     })
-                    // NEW: Live Progress Memory Logging for Phase 2
                     .on('progress', (progress) => {
                         if (progress.percent && progress.percent > 0) {
                             const mem = process.memoryUsage();
-                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB`);
+                            const cpuLoad = os.loadavg()[0].toFixed(1);
+                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0`);
                         }
                     })
                     .on('error', (err, stdout, stderr) => {
@@ -305,9 +305,6 @@ async function processQueue() {
 
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
-                
-                const memAfter = process.memoryUsage();
-                console.log(`[Job ${jobId}] RAM usage after batch: RSS ${(memAfter.rss / 1024 / 1024).toFixed(1)}MB`);
                 
                 await new Promise(r => setTimeout(r, 3000));
             }
@@ -329,13 +326,13 @@ async function processQueue() {
             await new Promise((resolve, reject) => {
                 let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 1']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 6']);
 
-                // NEW: Live Progress Memory Logging for Phase 3
                 command.on('progress', (progress) => {
                         if (progress.percent && progress.percent > 0) {
                             const mem = process.memoryUsage();
-                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB`);
+                            const cpuLoad = os.loadavg()[0].toFixed(1);
+                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0`);
                         }
                     })
                     .on('error', (err, stdout, stderr) => {
@@ -386,4 +383,4 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Deep Debug Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Multifunctional AI Video Worker running on port ${PORT}`));
