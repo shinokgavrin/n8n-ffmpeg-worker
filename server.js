@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13 (Safe Layering) is active!");
+    res.send("Multifunctional AI Video Worker v13.1 (Safe Layering + Silent Output) is active!");
 });
 
 const jobQueue = [];
@@ -115,7 +115,7 @@ async function processQueue() {
     let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING V13 SAFE LAYERING ===`);
+        console.log(`\n[Job ${jobId}] === STARTING V13.1 SAFE LAYERING ===`);
         console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -141,7 +141,9 @@ async function processQueue() {
             fs.writeFileSync(concatTxtPath, concatText);
 
             await new Promise((resolve, reject) => {
-                ffmpeg(inputPath).input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
+                ffmpeg(inputPath)
+                    .outputOptions(['-nostats', '-loglevel', 'error'])
+                    .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
                     .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast'])
                     .save(burnedPath).on('end', resolve).on('error', reject);
@@ -171,7 +173,6 @@ async function processQueue() {
                 }
             }
 
-            // МАГИЯ СТАБИЛЬНОСТИ: Снижаем нагрузку, делая батчи по 6 элементов (вместо 12)
             const BATCH_SIZE = 6;
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
 
@@ -183,7 +184,7 @@ async function processQueue() {
 
                 console.log(`[Job ${jobId}]    Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets)...`);
 
-                let command = ffmpeg(currentVideo);
+                let command = ffmpeg(currentVideo).outputOptions(['-nostats', '-loglevel', 'error']); // Silence FFmpeg spam
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
@@ -193,14 +194,11 @@ async function processQueue() {
                 });
 
                 let complexFilters = [];
-                // Ограничиваем потоки 3 ядрами, чтобы оставлять Railway пространство для маневра
                 let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '3'];
 
-                // МАГИЯ СЖАТИЯ: Более щадящие параметры
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
                 } else {
-                    // Используем CRF 16 (отличное качество, но меньше вес файла) и preset medium (стабильно)
                     outputOptions.push('-c:v libx264', '-crf 16', '-preset medium');
                 }
 
@@ -247,7 +245,6 @@ async function processQueue() {
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
                 
-                // Микро-пауза в 3 секунды, чтобы Railway успел сбросить графики нагрузки
                 await new Promise(r => setTimeout(r, 3000));
             }
         }
@@ -266,14 +263,15 @@ async function processQueue() {
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
-                ffmpeg(currentVideo).complexFilter(filterComplex, ['outv', 'outa'])
+                ffmpeg(currentVideo)
+                    .outputOptions(['-nostats', '-loglevel', 'error'])
+                    .complexFilter(filterComplex, ['outv', 'outa'])
                     .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 3'])
                     .save(finalPath).on('end', resolve).on('error', reject);
             });
             currentVideo = finalPath;
         }
 
-        // ОТПРАВКА НА WEBHOOK
         if (webhookUrl) {
             console.log(`[Job ${jobId}] Sending video to webhook: ${webhookUrl}`);
             const fileStream = fs.createReadStream(currentVideo);
