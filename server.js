@@ -11,10 +11,9 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.4 (CPU Load Balanced) is active!");
+    res.send("Multifunctional AI Video Worker v13.5 (Strict Thread Throttling) is active!");
 });
 
-// Endpoint for checking server status
 app.get('/status', (req, res) => {
     res.json({
         status: 'running',
@@ -133,7 +132,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.4 CPU BALANCED RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.5 STRICT THREAD THROTTLING ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -165,8 +164,7 @@ async function processQueue() {
                 let command = ffmpeg(inputPath)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    // FIXED: Reduced to 4 threads
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 4']);
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 2']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err, stdout, stderr) => {
@@ -221,12 +219,14 @@ async function processQueue() {
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
                 
                 let command = ffmpeg(currentVideo);
-                command.inputOptions(['-thread_queue_size', '512']);
+                
+                // STRICT DECODER THROTTLE: Limit main video to 1 thread
+                command.inputOptions(['-thread_queue_size', '512', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
-                        // FIXED: Removed the -t trick. Strictly loop images and rely on enable filter.
-                        let options = ['-thread_queue_size', '256']; 
+                        // STRICT DECODER THROTTLE: Limit every asset to 1 thread to prevent decoder explosion
+                        let options = ['-thread_queue_size', '256', '-threads', '1']; 
                         if (action.isGif) {
                             options.push('-ignore_loop', '0');
                         } else {
@@ -238,8 +238,8 @@ async function processQueue() {
 
                 let complexFilters = [];
                 
-                // FIXED: Hard limit to 4 encoder threads and 4 filter threads
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '4', '-filter_threads', '4'];
+                // REDUCED: 2 encoder threads + 2 filter threads + 7 input threads = strictly under 12 active threads
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '2', '-filter_threads', '2'];
 
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
@@ -282,7 +282,7 @@ async function processQueue() {
                 command.outputOptions(outputOptions);
 
                 await new Promise((resolve, reject) => {
-                    let lastLogTime = 0; // Throttle logger to save CPU
+                    let lastLogTime = 0; 
                     command.on('start', (cmdLine) => {
                         console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
                     })
@@ -333,8 +333,7 @@ async function processQueue() {
                 let lastLogTime = 0;
                 let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    // FIXED: Reduced to 4 threads
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 4']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 2']);
 
                 command.on('progress', (progress) => {
                         const now = Date.now();
