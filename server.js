@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.3 (8-Core Optimized) is active!");
+    res.send("Multifunctional AI Video Worker v13.4 (CPU Load Balanced) is active!");
 });
 
 // Endpoint for checking server status
@@ -133,7 +133,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.3 8-CORE RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.4 CPU BALANCED RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -165,7 +165,8 @@ async function processQueue() {
                 let command = ffmpeg(inputPath)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 6']);
+                    // FIXED: Reduced to 4 threads
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 4']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err, stdout, stderr) => {
@@ -207,7 +208,6 @@ async function processQueue() {
                 }
             }
 
-            // Using 6 batch size - sufficient power to chew through them concurrently
             const BATCH_SIZE = 6; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
@@ -221,22 +221,25 @@ async function processQueue() {
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
                 
                 let command = ffmpeg(currentVideo);
+                command.inputOptions(['-thread_queue_size', '512']);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
-                        let options = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
-                        
-                        if (!action.isGif) {
-                            const duration = parseFloat(action.end_time) - parseFloat(action.start_time);
-                            options.push(`-t ${duration}`);
+                        // FIXED: Removed the -t trick. Strictly loop images and rely on enable filter.
+                        let options = ['-thread_queue_size', '256']; 
+                        if (action.isGif) {
+                            options.push('-ignore_loop', '0');
+                        } else {
+                            options.push('-loop', '1');
                         }
                         command.input(action.localPath).inputOptions(options);
                     }
                 });
 
                 let complexFilters = [];
-                // Hard limit to 6 threads to protect 2 vCPUs for Railway Healthchecks/Node
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '6', '-filter_threads', '6'];
+                
+                // FIXED: Hard limit to 4 encoder threads and 4 filter threads
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '4', '-filter_threads', '4'];
 
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
@@ -279,14 +282,17 @@ async function processQueue() {
                 command.outputOptions(outputOptions);
 
                 await new Promise((resolve, reject) => {
+                    let lastLogTime = 0; // Throttle logger to save CPU
                     command.on('start', (cmdLine) => {
                         console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
                     })
                     .on('progress', (progress) => {
-                        if (progress.percent && progress.percent > 0) {
+                        const now = Date.now();
+                        if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
                             const mem = process.memoryUsage();
                             const cpuLoad = os.loadavg()[0].toFixed(1);
-                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0`);
+                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0   `);
+                            lastLogTime = now;
                         }
                     })
                     .on('error', (err, stdout, stderr) => {
@@ -324,15 +330,19 @@ async function processQueue() {
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
+                let lastLogTime = 0;
                 let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 6']);
+                    // FIXED: Reduced to 4 threads
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 4']);
 
                 command.on('progress', (progress) => {
-                        if (progress.percent && progress.percent > 0) {
+                        const now = Date.now();
+                        if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
                             const mem = process.memoryUsage();
                             const cpuLoad = os.loadavg()[0].toFixed(1);
-                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0`);
+                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0   `);
+                            lastLogTime = now;
                         }
                     })
                     .on('error', (err, stdout, stderr) => {
