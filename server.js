@@ -1,8 +1,3 @@
-Here is the complete, updated code. I have integrated the real-time memory logging into both **Phase 2** (the heavy layering phase) and **Phase 3** (the jump cut phase) exactly as discussed.
-
-This will overwrite the same line in your Railway logs during rendering, giving you a live look at the RSS memory footprint as FFmpeg works through the file.
-
-```javascript
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
@@ -392,5 +387,3 @@ app.post('/render', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Deep Debug Worker running on port ${PORT}`));
-
-```
