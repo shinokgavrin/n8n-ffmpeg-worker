@@ -10,7 +10,22 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.1 (Safe Layering + Silent Output) is active!");
+    res.send("Multifunctional AI Video Worker v13.2 (Deep Debugging) is active!");
+});
+
+// Добавляем endpoint для проверки состояния сервера
+app.get('/status', (req, res) => {
+    res.json({
+        status: 'running',
+        queueLength: jobQueue.length,
+        isProcessing: isProcessing,
+        uptime: process.uptime(),
+        memoryUsageMB: {
+            rss: (process.memoryUsage().rss / 1024 / 1024).toFixed(1),
+            heapTotal: (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1),
+            heapUsed: (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1),
+        }
+    });
 });
 
 const jobQueue = [];
@@ -115,8 +130,12 @@ async function processQueue() {
     let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING V13.1 SAFE LAYERING ===`);
-        console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
+        console.log(`\n======================================================`);
+        console.log(`[Job ${jobId}] === STARTING V13.2 DEEP DEBUG RENDER ===`);
+        console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
+        const mem = process.memoryUsage();
+        console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | Heap ${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB`);
+        console.log(`======================================================\n`);
         
         await downloadFile(videoUrl, inputPath, jobId);
         let currentVideo = inputPath;
@@ -141,17 +160,29 @@ async function processQueue() {
             fs.writeFileSync(concatTxtPath, concatText);
 
             await new Promise((resolve, reject) => {
-                ffmpeg(inputPath)
-                    .outputOptions(['-nostats', '-loglevel', 'error'])
+                let command = ffmpeg(inputPath)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast'])
-                    .save(burnedPath).on('end', resolve).on('error', reject);
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast']);
+
+                command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
+                       .on('error', (err, stdout, stderr) => {
+                           console.error(`\n[Job ${jobId}] [Phase 1] FFmpeg FAILED`);
+                           console.error(`Error Message: ${err.message}`);
+                           if (stderr) console.error(`FFmpeg STDERR:\n${stderr}`);
+                           reject(err);
+                       })
+                       .on('end', () => {
+                           console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Success!`);
+                           resolve();
+                       });
+
+                command.save(burnedPath);
             });
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: ITERATIVE SAFE LAYERING
+        // PHASE 2: SAFE LAYERING WITH DEBUGGING
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -160,7 +191,8 @@ async function processQueue() {
         const hasEditorActions = muteActions.length > 0 || overlayActions.length > 0;
 
         if (hasEditorActions) {
-            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets safely in MICRO-batches...`);
+            console.log(`\n[Job ${jobId}] === Phase 2: Overlay Processing ===`);
+            console.log(`[Job ${jobId}] Total Assets to process: ${overlayActions.length}`);
             
             for (let i = 0; i < overlayActions.length; i++) {
                 if (overlayActions[i].url) {
@@ -175,6 +207,7 @@ async function processQueue() {
 
             const BATCH_SIZE = 6;
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
+            console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
             for (let b = 0; b < totalBatches; b++) {
                 const isLastBatch = (b === totalBatches - 1);
@@ -182,9 +215,11 @@ async function processQueue() {
                 const batchOutputPath = path.join(__dirname, `layer_${jobId}_${b}.mp4`);
                 generatedFiles.push(batchOutputPath);
 
-                console.log(`[Job ${jobId}]    Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets)...`);
+                console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
+                const memBefore = process.memoryUsage();
+                console.log(`[Job ${jobId}] RAM usage before batch: RSS ${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`);
 
-                let command = ffmpeg(currentVideo).outputOptions(['-nostats', '-loglevel', 'error']); // Silence FFmpeg spam
+                let command = ffmpeg(currentVideo);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
@@ -237,13 +272,36 @@ async function processQueue() {
                 command.outputOptions(outputOptions);
 
                 await new Promise((resolve, reject) => {
-                    command.save(batchOutputPath)
-                        .on('end', () => resolve())
-                        .on('error', (err) => reject(err));
+                    // DEBUGGING HANDLERS
+                    command.on('start', (cmdLine) => {
+                        console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
+                        // Раскомментируйте строку ниже, если хотите видеть всю простыню команды
+                        // console.log(cmdLine); 
+                    })
+                    .on('progress', (progress) => {
+                        if (progress.percent && progress.percent > 0) {
+                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}%`);
+                        }
+                    })
+                    .on('error', (err, stdout, stderr) => {
+                        console.error(`\n[Job ${jobId}] [Layer ${b + 1}] FFmpeg FAILED`);
+                        console.error(`Error Message: ${err.message}`);
+                        if (stderr) console.error(`\n================ STDERR ================\n${stderr}\n=======================================\n`);
+                        reject(err);
+                    })
+                    .on('end', () => {
+                        console.log(`\n[Job ${jobId}] [Layer ${b + 1}] Completed Successfully.`);
+                        resolve();
+                    });
+
+                    command.save(batchOutputPath);
                 });
 
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
+                
+                const memAfter = process.memoryUsage();
+                console.log(`[Job ${jobId}] RAM usage after batch: RSS ${(memAfter.rss / 1024 / 1024).toFixed(1)}MB`);
                 
                 await new Promise(r => setTimeout(r, 3000));
             }
@@ -252,7 +310,7 @@ async function processQueue() {
         // PHASE 3: JUMP CUTS
         const hasCuts = keep_segments && Array.isArray(keep_segments) && keep_segments.length > 0;
         if (hasCuts) {
-            console.log(`[Job ${jobId}] Phase 3: Performing jump cuts...`);
+            console.log(`\n[Job ${jobId}] === Phase 3: Performing jump cuts ===`);
             let filterComplex = '', concatInputs = '';
             keep_segments.forEach((seg, i) => {
                 const start = parseFloat(seg.start), end = parseFloat(seg.end);
@@ -263,17 +321,24 @@ async function processQueue() {
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
 
             await new Promise((resolve, reject) => {
-                ffmpeg(currentVideo)
-                    .outputOptions(['-nostats', '-loglevel', 'error'])
+                let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 3'])
-                    .save(finalPath).on('end', resolve).on('error', reject);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 3']);
+
+                command.on('error', (err, stdout, stderr) => {
+                        console.error(`\n[Job ${jobId}] [Phase 3] FFmpeg FAILED`);
+                        if (stderr) console.error(`STDERR:\n${stderr}`);
+                        reject(err);
+                    })
+                    .on('end', resolve);
+
+                command.save(finalPath);
             });
             currentVideo = finalPath;
         }
 
         if (webhookUrl) {
-            console.log(`[Job ${jobId}] Sending video to webhook: ${webhookUrl}`);
+            console.log(`\n[Job ${jobId}] Sending video to webhook: ${webhookUrl}`);
             const fileStream = fs.createReadStream(currentVideo);
             await axios.post(webhookUrl, fileStream, {
                 headers: { 'Content-Type': 'video/mp4' },
@@ -286,7 +351,7 @@ async function processQueue() {
         }
 
     } catch (error) {
-        console.error(`[Job ${jobId}] Critical Error:`, error.message);
+        console.error(`\n[Job ${jobId}] Critical Global Error:`, error.message);
     } finally {
         console.log(`[Job ${jobId}] Cleaning up temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
@@ -305,4 +370,4 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Safe Layering Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Deep Debug Worker running on port ${PORT}`));
