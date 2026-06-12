@@ -1,3 +1,8 @@
+Here is the complete, updated code. I have integrated the real-time memory logging into both **Phase 2** (the heavy layering phase) and **Phase 3** (the jump cut phase) exactly as discussed.
+
+This will overwrite the same line in your Railway logs during rendering, giving you a live look at the RSS memory footprint as FFmpeg works through the file.
+
+```javascript
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
@@ -13,7 +18,7 @@ app.get('/debug', (req, res) => {
     res.send("Multifunctional AI Video Worker v13.2 (Deep Debugging) is active!");
 });
 
-// Добавляем endpoint для проверки состояния сервера
+// Endpoint for checking server status
 app.get('/status', (req, res) => {
     res.json({
         status: 'running',
@@ -205,7 +210,8 @@ async function processQueue() {
                 }
             }
 
-            const BATCH_SIZE = 6;
+            // OOM Prevention: Batch size lowered to 2
+            const BATCH_SIZE = 2; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
@@ -223,13 +229,19 @@ async function processQueue() {
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
-                        const loopOpt = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
-                        command.input(action.localPath).inputOptions(loopOpt);
+                        let options = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
+                        
+                        if (!action.isGif) {
+                            const duration = parseFloat(action.end_time) - parseFloat(action.start_time);
+                            options.push(`-t ${duration}`);
+                        }
+                        command.input(action.localPath).inputOptions(options);
                     }
                 });
 
                 let complexFilters = [];
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '3'];
+                // Thread throttling
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1'];
 
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
@@ -272,15 +284,14 @@ async function processQueue() {
                 command.outputOptions(outputOptions);
 
                 await new Promise((resolve, reject) => {
-                    // DEBUGGING HANDLERS
                     command.on('start', (cmdLine) => {
                         console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
-                        // Раскомментируйте строку ниже, если хотите видеть всю простыню команды
-                        // console.log(cmdLine); 
                     })
+                    // NEW: Live Progress Memory Logging for Phase 2
                     .on('progress', (progress) => {
                         if (progress.percent && progress.percent > 0) {
-                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}%`);
+                            const mem = process.memoryUsage();
+                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB`);
                         }
                     })
                     .on('error', (err, stdout, stderr) => {
@@ -323,14 +334,24 @@ async function processQueue() {
             await new Promise((resolve, reject) => {
                 let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 3']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 1']);
 
-                command.on('error', (err, stdout, stderr) => {
+                // NEW: Live Progress Memory Logging for Phase 3
+                command.on('progress', (progress) => {
+                        if (progress.percent && progress.percent > 0) {
+                            const mem = process.memoryUsage();
+                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB`);
+                        }
+                    })
+                    .on('error', (err, stdout, stderr) => {
                         console.error(`\n[Job ${jobId}] [Phase 3] FFmpeg FAILED`);
                         if (stderr) console.error(`STDERR:\n${stderr}`);
                         reject(err);
                     })
-                    .on('end', resolve);
+                    .on('end', () => {
+                        console.log(`\n[Job ${jobId}] [Phase 3] Completed Successfully.`);
+                        resolve();
+                    });
 
                 command.save(finalPath);
             });
@@ -353,7 +374,7 @@ async function processQueue() {
     } catch (error) {
         console.error(`\n[Job ${jobId}] Critical Global Error:`, error.message);
     } finally {
-        console.log(`[Job ${jobId}] Cleaning up temporary files...`);
+        console.log(`\n[Job ${jobId}] Cleaning up temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
         
         isProcessing = false;
@@ -371,3 +392,5 @@ app.post('/render', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Deep Debug Worker running on port ${PORT}`));
+
+```
