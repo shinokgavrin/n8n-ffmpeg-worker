@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v10 (Stable Queue + No Chunking) is active!");
+    res.send("Multifunctional AI Video Worker v11.1 (HQ Smart Layering) is active!");
 });
 
 const jobQueue = [];
@@ -108,15 +108,14 @@ async function processQueue() {
 
     const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
     const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
-    const actionsPath = path.join(__dirname, `actions_${jobId}.mp4`);
     const finalPath = path.join(__dirname, `final_${jobId}.mp4`);
     const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
     const blankPath = path.join(__dirname, `blank_${jobId}.png`);
     
-    let generatedFiles = [inputPath, burnedPath, actionsPath, finalPath, concatTxtPath, blankPath];
+    let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
-        console.log(`\n[Job ${jobId}] === STARTING STABLE V10 PROCESSING ===`);
+        console.log(`\n[Job ${jobId}] === STARTING V11.1 HQ SMART LAYERING ===`);
         console.log(`[Job ${jobId}] Jobs remaining in queue: ${jobQueue.length}`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -150,7 +149,7 @@ async function processQueue() {
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: SINGLE-PASS OVERLAYS (STABLE)
+        // PHASE 2: ITERATIVE HQ LAYERING
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -159,9 +158,8 @@ async function processQueue() {
         const hasEditorActions = muteActions.length > 0 || overlayActions.length > 0;
 
         if (hasEditorActions) {
-            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets in a single stable pass...`);
+            console.log(`[Job ${jobId}] Phase 2: Processing ${overlayActions.length} assets safely in HQ layered batches...`);
             
-            // Скачиваем ассеты
             for (let i = 0; i < overlayActions.length; i++) {
                 if (overlayActions[i].url) {
                     const ext = path.extname(overlayActions[i].asset_name || '').toLowerCase() || '.png';
@@ -173,62 +171,81 @@ async function processQueue() {
                 }
             }
 
-            let command = ffmpeg(currentVideo).inputOptions(['-thread_queue_size', '4096']);
+            const BATCH_SIZE = 12;
+            const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
 
-            // Подаем файлы (без обрезки -t, самый стабильный метод)
-            overlayActions.forEach(action => {
-                if (action.localPath) {
-                    // Используем -ignore_loop 0 для GIF и -loop 1 для статики
-                    const loopOpt = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
-                    command.input(action.localPath).inputOptions([...loopOpt, '-thread_queue_size', '512']);
-                }
-            });
+            for (let b = 0; b < totalBatches; b++) {
+                const isLastBatch = (b === totalBatches - 1);
+                const batchOverlays = overlayActions.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+                const batchOutputPath = path.join(__dirname, `layer_${jobId}_${b}.mp4`);
+                generatedFiles.push(batchOutputPath);
 
-            let complexFilters = [];
-            // Используем libx264 и ограничиваем потоки, чтобы не "порвать" сервер
-            let outputOptions = ['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-shortest', '-threads 4'];
+                console.log(`[Job ${jobId}]    Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets)...`);
 
-            if (muteActions.length > 0) {
-                const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
-                complexFilters.push(`[0:a]${volumeFilters}[outa]`);
-                outputOptions.push('-map [outa]');
-            } else {
-                outputOptions.push('-map 0:a');
-            }
+                let command = ffmpeg(currentVideo);
 
-            if (overlayActions.length > 0) {
-                let currentVidNode = '[0:v]';
-                overlayActions.forEach((action, idx) => {
-                    const nextVidNode = idx === overlayActions.length - 1 ? '[outv]' : `[v${idx + 1}]`;
-                    const inputIdx = idx + 1;
-                    const scaledNode = `[scaled_v${idx + 1}]`;
-                    
-                    const MAX_W = parseInt(action.max_width) || 800;
-                    const MAX_H = parseInt(action.max_height) || 800;
-                    const startT = parseFloat(action.start_time);
-                    const endT = parseFloat(action.end_time);
-
-                    complexFilters.push(`[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
-                    complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startT},${endT})':eof_action=pass${nextVidNode}`);
-                    
-                    currentVidNode = nextVidNode;
+                batchOverlays.forEach(action => {
+                    if (action.localPath) {
+                        const loopOpt = action.isGif ? ['-ignore_loop', '0'] : ['-loop', '1'];
+                        command.input(action.localPath).inputOptions(loopOpt);
+                    }
                 });
-                outputOptions.push('-map [outv]');
-            } else {
-                outputOptions.push('-map 0:v');
-            }
 
-            if (complexFilters.length > 0) command.complexFilter(complexFilters);
-            command.outputOptions(outputOptions);
+                let complexFilters = [];
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads 4'];
 
-            await new Promise((resolve, reject) => {
-                command.save(actionsPath)
-                    .on('end', () => { currentVideo = actionsPath; resolve(); })
-                    .on('error', (err, stdout, stderr) => {
-                        console.error(`[Job ${jobId}] FFmpeg error:`, err.message);
-                        reject(err);
+                // ОБНОВЛЕННАЯ МАГИЯ КАЧЕСТВА (CRF 14 + preset fast)
+                if (isLastBatch) {
+                    // Финальный проход: нормальное сжатие для адекватного размера файла
+                    outputOptions.push('-c:v libx264', '-crf 22', '-preset fast');
+                } else {
+                    // Промежуточные проходы: Visually Lossless
+                    outputOptions.push('-c:v libx264', '-crf 14', '-preset fast');
+                }
+
+                if (b === 0) {
+                    outputOptions.push('-c:a aac');
+                    if (muteActions.length > 0) {
+                        const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
+                        complexFilters.push(`[0:a]${volumeFilters}[outa]`);
+                        outputOptions.push('-map [outa]');
+                    } else {
+                        outputOptions.push('-map 0:a');
+                    }
+                } else {
+                    outputOptions.push('-c:a copy', '-map 0:a');
+                }
+
+                if (batchOverlays.length > 0) {
+                    let currentVidNode = '[0:v]';
+                    batchOverlays.forEach((action, idx) => {
+                        const nextVidNode = idx === batchOverlays.length - 1 ? '[outv]' : `[v${idx + 1}]`;
+                        const inputIdx = idx + 1;
+                        const scaledNode = `[scaled_v${idx + 1}]`;
+                        const MAX_W = parseInt(action.max_width) || 800, MAX_H = parseInt(action.max_height) || 800;
+                        const startT = parseFloat(action.start_time), endT = parseFloat(action.end_time);
+
+                        complexFilters.push(`[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
+                        complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startT},${endT})':eof_action=pass${nextVidNode}`);
+                        currentVidNode = nextVidNode;
                     });
-            });
+                    outputOptions.push('-map [outv]');
+                } else {
+                    outputOptions.push('-map 0:v');
+                }
+
+                if (complexFilters.length > 0) command.complexFilter(complexFilters);
+                command.outputOptions(outputOptions);
+
+                await new Promise((resolve, reject) => {
+                    command.save(batchOutputPath)
+                        .on('end', () => resolve())
+                        .on('error', (err) => reject(err));
+                });
+
+                if (b > 0) fs.unlinkSync(currentVideo); 
+                currentVideo = batchOutputPath;
+            }
         }
 
         // PHASE 3: JUMP CUTS
@@ -246,7 +263,7 @@ async function processQueue() {
 
             await new Promise((resolve, reject) => {
                 ffmpeg(currentVideo).complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast'])
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-crf 22'])
                     .save(finalPath).on('end', resolve).on('error', reject);
             });
             currentVideo = finalPath;
@@ -273,7 +290,7 @@ async function processQueue() {
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
         
         isProcessing = false;
-        processQueue(); // Запускаем следующую задачу в очереди
+        processQueue(); 
     }
 }
 
@@ -286,4 +303,4 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Stable V10 Worker running on port ${PORT}`));
+app.listen(PORT, () => console.log(`HQ Smart Layering Worker running on port ${PORT}`));
