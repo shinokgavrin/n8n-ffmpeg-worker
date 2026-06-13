@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.6 (Memory & Thread Throttling) is active!");
+    res.send("Multifunctional AI Video Worker v13.7 (CPU Starvation Fix & Fast Preset) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -132,7 +132,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.6 MEMORY & THREAD THROTTLING ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.7 CPU STARVATION FIX ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -206,8 +206,8 @@ async function processQueue() {
                 }
             }
 
-            // REDUCED BATCH SIZE TO PROTECT RAM
-            const BATCH_SIZE = 3; 
+            // REDUCED BATCH SIZE TO PROTECT RAM AND CPU
+            const BATCH_SIZE = 2; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
@@ -242,10 +242,11 @@ async function processQueue() {
                 // REDUCED THREADS + ADDED MUXING BUFFER TO PROTECT MEMORY
                 let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '2', '-filter_threads', '2', '-max_muxing_queue_size', '9999'];
 
+                // CHANGED TO -preset fast TO PREVENT NODE.JS CPU STARVATION (SIGTERM)
                 if (isLastBatch) {
-                    outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
+                    outputOptions.push('-c:v libx264', '-crf 22', '-preset fast');
                 } else {
-                    outputOptions.push('-c:v libx264', '-crf 16', '-preset medium');
+                    outputOptions.push('-c:v libx264', '-crf 16', '-preset fast');
                 }
 
                 if (b === 0) {
@@ -336,7 +337,7 @@ async function processQueue() {
                 let lastLogTime = 0;
                 let command = ffmpeg(currentVideo)
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset medium', '-crf 22', '-threads 2']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-crf 22', '-threads 2']);
 
                 command.on('progress', (progress) => {
                         const now = Date.now();
