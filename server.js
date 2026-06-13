@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.9 (Renice Anti-Starvation) is active!");
+    res.send("Multifunctional AI Video Worker v14.1 (Video Overlay Support) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -132,7 +132,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.9 RENICE ANTI-STARVATION ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.1 VIDEO OVERLAY SUPPORT ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -162,7 +162,7 @@ async function processQueue() {
 
             await new Promise((resolve, reject) => {
                 let command = ffmpeg(inputPath)
-                    .renice(15) // LOW PRIORITY TO PREVENT SIGTERM
+                    .renice(15)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
                     .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset ultrafast', '-threads 1']);
@@ -170,7 +170,6 @@ async function processQueue() {
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err, stdout, stderr) => {
                            console.error(`\n[Job ${jobId}] [Phase 1] FFmpeg FAILED`);
-                           console.error(`Error Message: ${err.message}`);
                            if (stderr) console.error(`FFmpeg STDERR:\n${stderr}`);
                            reject(err);
                        })
@@ -202,12 +201,15 @@ async function processQueue() {
                     const localPath = path.join(__dirname, `asset_${jobId}_${i}${ext}`);
                     await downloadFile(overlayActions[i].url, localPath, jobId);
                     overlayActions[i].localPath = localPath;
+                    
+                    // FORMAT DETECTION
+                    overlayActions[i].isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
                     overlayActions[i].isGif = ext === '.gif';
+                    
                     generatedFiles.push(localPath);
                 }
             }
 
-            // REDUCED TO 1 ASSET PER BATCH (SEQUENTIAL) FOR ABSOLUTE STABILITY
             const BATCH_SIZE = 1; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
@@ -220,18 +222,22 @@ async function processQueue() {
 
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
                 
-                let command = ffmpeg(currentVideo).renice(15); // VIP PRIORITY FOR NODE.JS
-                
+                let command = ffmpeg(currentVideo).renice(15); 
                 command.inputOptions(['-thread_queue_size', '512', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
                         let options = ['-thread_queue_size', '256', '-threads', '1']; 
+                        
+                        // NEW VIDEO LOOPING LOGIC
                         if (action.isGif) {
-                            options.push('-ignore_loop', '0');
+                            options.push('-ignore_loop', '0'); // Legacy GIF looping
+                        } else if (action.isVideo) {
+                            options.push('-stream_loop', '-1'); // Infinite looping for MP4/WebM
                         } else {
-                            options.push('-loop', '1');
+                            options.push('-loop', '1'); // Static image looping
                         }
+                        
                         command.input(action.localPath).inputOptions(options);
                     }
                 });
@@ -295,7 +301,6 @@ async function processQueue() {
                     })
                     .on('error', (err, stdout, stderr) => {
                         console.error(`\n[Job ${jobId}] [Layer ${b + 1}] FFmpeg FAILED`);
-                        console.error(`Error Message: ${err.message}`);
                         if (stderr) console.error(`\n================ STDERR ================\n${stderr}\n=======================================\n`);
                         reject(err);
                     })
@@ -331,7 +336,7 @@ async function processQueue() {
             await new Promise((resolve, reject) => {
                 let lastLogTime = 0;
                 let command = ffmpeg(currentVideo)
-                    .renice(15) // VIP PRIORITY FOR NODE.JS
+                    .renice(15) 
                     .complexFilter(filterComplex, ['outv', 'outa'])
                     .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset ultrafast', '-crf 22', '-threads 1']);
 
