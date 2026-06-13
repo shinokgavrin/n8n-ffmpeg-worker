@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.5 (Strict Thread Throttling) is active!");
+    res.send("Multifunctional AI Video Worker v13.6 (Memory & Thread Throttling) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -132,7 +132,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.5 STRICT THREAD THROTTLING ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.6 MEMORY & THREAD THROTTLING ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -206,7 +206,8 @@ async function processQueue() {
                 }
             }
 
-            const BATCH_SIZE = 6; 
+            // REDUCED BATCH SIZE TO PROTECT RAM
+            const BATCH_SIZE = 3; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
@@ -238,8 +239,8 @@ async function processQueue() {
 
                 let complexFilters = [];
                 
-                // REDUCED: 2 encoder threads + 2 filter threads + 7 input threads = strictly under 12 active threads
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '2', '-filter_threads', '2'];
+                // REDUCED THREADS + ADDED MUXING BUFFER TO PROTECT MEMORY
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '2', '-filter_threads', '2', '-max_muxing_queue_size', '9999'];
 
                 if (isLastBatch) {
                     outputOptions.push('-c:v libx264', '-crf 22', '-preset medium');
@@ -312,7 +313,9 @@ async function processQueue() {
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
                 
-                await new Promise(r => setTimeout(r, 3000));
+                // EXTENDED BREATHING DELAY TO FLUSH MEMORY
+                console.log(`\n[Job ${jobId}] Resting for 8 seconds to allow RAM Garbage Collection...`);
+                await new Promise(r => setTimeout(r, 8000));
             }
         }
 
