@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v13.7 (CPU Starvation Fix & Fast Preset) is active!");
+    res.send("Multifunctional AI Video Worker v13.9 (Renice Anti-Starvation) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -132,7 +132,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V13.7 CPU STARVATION FIX ===`);
+        console.log(`[Job ${jobId}] === STARTING V13.9 RENICE ANTI-STARVATION ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         const mem = process.memoryUsage();
         console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
@@ -162,9 +162,10 @@ async function processQueue() {
 
             await new Promise((resolve, reject) => {
                 let command = ffmpeg(inputPath)
+                    .renice(15) // LOW PRIORITY TO PREVENT SIGTERM
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset fast', '-threads 2']);
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset ultrafast', '-threads 1']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err, stdout, stderr) => {
@@ -206,8 +207,8 @@ async function processQueue() {
                 }
             }
 
-            // REDUCED BATCH SIZE TO PROTECT RAM AND CPU
-            const BATCH_SIZE = 2; 
+            // REDUCED TO 1 ASSET PER BATCH (SEQUENTIAL) FOR ABSOLUTE STABILITY
+            const BATCH_SIZE = 1; 
             const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
             console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
 
@@ -219,14 +220,12 @@ async function processQueue() {
 
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
                 
-                let command = ffmpeg(currentVideo);
+                let command = ffmpeg(currentVideo).renice(15); // VIP PRIORITY FOR NODE.JS
                 
-                // STRICT DECODER THROTTLE: Limit main video to 1 thread
                 command.inputOptions(['-thread_queue_size', '512', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
-                        // STRICT DECODER THROTTLE: Limit every asset to 1 thread to prevent decoder explosion
                         let options = ['-thread_queue_size', '256', '-threads', '1']; 
                         if (action.isGif) {
                             options.push('-ignore_loop', '0');
@@ -238,15 +237,12 @@ async function processQueue() {
                 });
 
                 let complexFilters = [];
-                
-                // REDUCED THREADS + ADDED MUXING BUFFER TO PROTECT MEMORY
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '2', '-filter_threads', '2', '-max_muxing_queue_size', '9999'];
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '9999'];
 
-                // CHANGED TO -preset fast TO PREVENT NODE.JS CPU STARVATION (SIGTERM)
                 if (isLastBatch) {
-                    outputOptions.push('-c:v libx264', '-crf 22', '-preset fast');
+                    outputOptions.push('-c:v libx264', '-crf 22', '-preset ultrafast');
                 } else {
-                    outputOptions.push('-c:v libx264', '-crf 16', '-preset fast');
+                    outputOptions.push('-c:v libx264', '-crf 16', '-preset ultrafast');
                 }
 
                 if (b === 0) {
@@ -314,9 +310,8 @@ async function processQueue() {
                 if (b > 0) fs.unlinkSync(currentVideo); 
                 currentVideo = batchOutputPath;
                 
-                // EXTENDED BREATHING DELAY TO FLUSH MEMORY
-                console.log(`\n[Job ${jobId}] Resting for 8 seconds to allow RAM Garbage Collection...`);
-                await new Promise(r => setTimeout(r, 8000));
+                console.log(`\n[Job ${jobId}] Resting for 4 seconds to allow RAM Garbage Collection...`);
+                await new Promise(r => setTimeout(r, 4000));
             }
         }
 
@@ -336,8 +331,9 @@ async function processQueue() {
             await new Promise((resolve, reject) => {
                 let lastLogTime = 0;
                 let command = ffmpeg(currentVideo)
+                    .renice(15) // VIP PRIORITY FOR NODE.JS
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset fast', '-crf 22', '-threads 2']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset ultrafast', '-crf 22', '-threads 1']);
 
                 command.on('progress', (progress) => {
                         const now = Date.now();
