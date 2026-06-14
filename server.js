@@ -7,13 +7,16 @@ const os = require('os');
 const { randomUUID } = require('crypto');
 const { createCanvas, loadImage } = require('canvas');
 
+const WORK_DIR = os.tmpdir(); 
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-const WORK_DIR = os.tmpdir(); 
+// Required for Railway automated health checks to prevent phantom SIGTERMs
+app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.3 (JIT Memory Architecture) is active!");
+    res.send("Multifunctional AI Video Worker v14.5 (Bitrate-Capped Production Final) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -151,7 +154,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.3 JIT ARCHITECTURE ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.5 PRODUCTION RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -182,7 +185,7 @@ async function processQueue() {
                     .renice(15)
                     .input(concatTxtPath).inputOptions(['-f', 'concat', '-safe', '0'])
                     .complexFilter(['[0:v][1:v]overlay=x=0:y=0:eof_action=pass[outv]'], 'outv')
-                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset ultrafast', '-threads 1']);
+                    .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset veryfast', '-crf 24', '-threads 1']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
                        .on('error', (err) => reject(err))
@@ -193,7 +196,7 @@ async function processQueue() {
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: SAFE LAYERING (Just-In-Time Downloading)
+        // PHASE 2: SAFE LAYERING 
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -206,12 +209,10 @@ async function processQueue() {
             const totalBatches = overlayActions.length > 0 ? overlayActions.length : 1;
 
             for (let b = 0; b < totalBatches; b++) {
-                const isLastBatch = (b === totalBatches - 1);
                 const batchOverlays = overlayActions.slice(b, b + 1);
                 const batchOutputPath = path.join(WORK_DIR, `layer_${jobId}_${b}.mp4`);
                 generatedFiles.push(batchOutputPath);
 
-                // --- JUST IN TIME DOWNLOAD ---
                 for (let action of batchOverlays) {
                     if (action.url) {
                         const ext = path.extname(action.asset_name || '').toLowerCase() || '.png';
@@ -231,7 +232,7 @@ async function processQueue() {
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
-                        let options = ['-thread_queue_size', '256', '-threads', '1']; 
+                        let options = ['-thread_queue_size', '64', '-threads', '1']; 
                         if (action.isGif) options.push('-ignore_loop', '0'); 
                         else if (action.isVideo) options.push('-stream_loop', '-1'); 
                         else options.push('-loop', '1'); 
@@ -240,10 +241,10 @@ async function processQueue() {
                 });
 
                 let complexFilters = [];
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '9999'];
+                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '1024'];
 
-                if (isLastBatch) outputOptions.push('-c:v libx264', '-crf 22', '-preset ultrafast');
-                else outputOptions.push('-c:v libx264', '-crf 16', '-preset ultrafast');
+                // Force FFmpeg to compress the video and cap the bitrate to prevent file bloat
+                outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 4M', '-bufsize 8M');
 
                 if (b === 0) {
                     outputOptions.push('-c:a aac');
@@ -294,26 +295,21 @@ async function processQueue() {
                     command.save(batchOutputPath);
                 });
 
-                // ==========================================
-                // AGGRESSIVE JIT MEMORY CLEANUP
-                // ==========================================
                 const prevVideo = currentVideo; 
                 currentVideo = batchOutputPath;
-                command = null; // Free FFmpeg object from memory
+                command = null; 
                 
-                // Aggressively delete the previous base video (even if it is the raw 500MB input)
                 if (fs.existsSync(prevVideo)) {
                     try { fs.unlinkSync(prevVideo); } catch(e) {}
                 }
 
-                // Instantly delete the MP4 overlay asset to clear buffer cache
                 batchOverlays.forEach(action => {
                     if (action.localPath && fs.existsSync(action.localPath)) {
                         try { fs.unlinkSync(action.localPath); action.localPath = null; } catch (e) {}
                     }
                 });
 
-                if (global.gc) global.gc(); // Force V8 to clear the memory
+                if (global.gc) global.gc(); 
                 await new Promise(r => setTimeout(r, 4000));
             }
         }
@@ -335,7 +331,7 @@ async function processQueue() {
                 let command = ffmpeg(currentVideo)
                     .renice(15) 
                     .complexFilter(filterComplex, ['outv', 'outa'])
-                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset ultrafast', '-crf 22', '-threads 1']);
+                    .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-preset veryfast', '-crf 24', '-threads 1']);
 
                 command.on('progress', (progress) => {
                         const now = Date.now();
