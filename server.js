@@ -379,4 +379,5 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Multifunctional AI Video Worker running on port ${PORT}`));
+// BIND TO 0.0.0.0 TO ALLOW RAILWAY HEALTH CHECKS
+app.listen(PORT, '0.0.0.0', () => console.log(`Multifunctional AI Video Worker running on port ${PORT} (Bound to 0.0.0.0)`));
