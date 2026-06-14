@@ -10,8 +10,10 @@ const { createCanvas, loadImage } = require('canvas');
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+const WORK_DIR = os.tmpdir(); 
+
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.1 (Video Overlay Support) is active!");
+    res.send("Multifunctional AI Video Worker v14.3 (JIT Memory Architecture) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -31,6 +33,23 @@ app.get('/status', (req, res) => {
 
 const jobQueue = [];
 let isProcessing = false;
+let activeTask = null; 
+
+process.on('SIGTERM', async () => {
+    console.log('\n[System] ⚠️ SIGTERM received from Railway. Container is being killed!');
+    if (activeTask && activeTask.webhookUrl) {
+        console.log(`[System] Notifying n8n webhook to abort Wait node for Job ${activeTask.jobId}...`);
+        try {
+            await axios.post(activeTask.webhookUrl, { 
+                error: 'Worker terminated by platform (SIGTERM / OOM)',
+                jobId: activeTask.jobId,
+                status: "failed"
+            });
+            console.log('[System] n8n notified successfully.');
+        } catch(e) {}
+    }
+    process.exit(0);
+});
 
 async function downloadFile(url, dest, jobId = '') {
     let attempts = 0;
@@ -119,23 +138,21 @@ async function processQueue() {
     if (isProcessing || jobQueue.length === 0) return;
     
     isProcessing = true;
-    const task = jobQueue.shift(); 
-    const { videoUrl, subtitles, keep_segments, actions, webhookUrl, jobId } = task;
+    activeTask = jobQueue.shift(); 
+    const { videoUrl, subtitles, keep_segments, actions, webhookUrl, jobId } = activeTask;
 
-    const inputPath = path.join(__dirname, `input_${jobId}.mp4`);
-    const burnedPath = path.join(__dirname, `burned_${jobId}.mp4`);
-    const finalPath = path.join(__dirname, `final_${jobId}.mp4`);
-    const concatTxtPath = path.join(__dirname, `concat_${jobId}.txt`);
-    const blankPath = path.join(__dirname, `blank_${jobId}.png`);
+    const inputPath = path.join(WORK_DIR, `input_${jobId}.mp4`);
+    const burnedPath = path.join(WORK_DIR, `burned_${jobId}.mp4`);
+    const finalPath = path.join(WORK_DIR, `final_${jobId}.mp4`);
+    const concatTxtPath = path.join(WORK_DIR, `concat_${jobId}.txt`);
+    const blankPath = path.join(WORK_DIR, `blank_${jobId}.png`);
     
     let generatedFiles = [inputPath, burnedPath, finalPath, concatTxtPath, blankPath];
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.1 VIDEO OVERLAY SUPPORT ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.3 JIT ARCHITECTURE ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
-        const mem = process.memoryUsage();
-        console.log(`[Job ${jobId}] Initial Memory: RSS ${(mem.rss / 1024 / 1024).toFixed(1)}MB | CPU: ${os.loadavg()[0].toFixed(2)}/8.0`);
         console.log(`======================================================\n`);
         
         await downloadFile(videoUrl, inputPath, jobId);
@@ -151,7 +168,7 @@ async function processQueue() {
             for (let i = 0; i < subtitles.length; i++) {
                 const sub = subtitles[i], start = parseFloat(sub.start), end = parseFloat(sub.end);
                 if (start > currentTime) concatText += `file 'blank_${jobId}.png'\nduration ${(start - currentTime).toFixed(2)}\n`;
-                const imgName = `sub_${jobId}_${i}.png`, imgPath = path.join(__dirname, imgName);
+                const imgName = `sub_${jobId}_${i}.png`, imgPath = path.join(WORK_DIR, imgName);
                 await renderSubtitleImage(sub.text, imgPath);
                 generatedFiles.push(imgPath);
                 concatText += `file '${imgName}'\nduration ${(end - start).toFixed(2)}\n`;
@@ -168,59 +185,46 @@ async function processQueue() {
                     .outputOptions(['-map 0:a', '-c:a copy', '-c:v libx264', '-pix_fmt yuv420p', '-preset ultrafast', '-threads 1']);
 
                 command.on('start', (cmdLine) => console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Command: \n${cmdLine}`))
-                       .on('error', (err, stdout, stderr) => {
-                           console.error(`\n[Job ${jobId}] [Phase 1] FFmpeg FAILED`);
-                           if (stderr) console.error(`FFmpeg STDERR:\n${stderr}`);
-                           reject(err);
-                       })
-                       .on('end', () => {
-                           console.log(`[Job ${jobId}] [Phase 1 - Subtitles] Success!`);
-                           resolve();
-                       });
+                       .on('error', (err) => reject(err))
+                       .on('end', () => resolve());
 
                 command.save(burnedPath);
             });
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: SAFE LAYERING WITH DEBUGGING
+        // PHASE 2: SAFE LAYERING (Just-In-Time Downloading)
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
             overlayActions = actions.filter(a => ['overlay_gif', 'overlay_image', 'overlay'].includes(a.type));
         }
-        const hasEditorActions = muteActions.length > 0 || overlayActions.length > 0;
-
-        if (hasEditorActions) {
+        
+        if (muteActions.length > 0 || overlayActions.length > 0) {
             console.log(`\n[Job ${jobId}] === Phase 2: Overlay Processing ===`);
-            console.log(`[Job ${jobId}] Total Assets to process: ${overlayActions.length}`);
             
-            for (let i = 0; i < overlayActions.length; i++) {
-                if (overlayActions[i].url) {
-                    const ext = path.extname(overlayActions[i].asset_name || '').toLowerCase() || '.png';
-                    const localPath = path.join(__dirname, `asset_${jobId}_${i}${ext}`);
-                    await downloadFile(overlayActions[i].url, localPath, jobId);
-                    overlayActions[i].localPath = localPath;
-                    
-                    // FORMAT DETECTION
-                    overlayActions[i].isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
-                    overlayActions[i].isGif = ext === '.gif';
-                    
-                    generatedFiles.push(localPath);
-                }
-            }
-
-            const BATCH_SIZE = 1; 
-            const totalBatches = Math.ceil(overlayActions.length / BATCH_SIZE) || 1;
-            console.log(`[Job ${jobId}] Calculated ${totalBatches} batches (Batch size: ${BATCH_SIZE})`);
+            const totalBatches = overlayActions.length > 0 ? overlayActions.length : 1;
 
             for (let b = 0; b < totalBatches; b++) {
                 const isLastBatch = (b === totalBatches - 1);
-                const batchOverlays = overlayActions.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-                const batchOutputPath = path.join(__dirname, `layer_${jobId}_${b}.mp4`);
+                const batchOverlays = overlayActions.slice(b, b + 1);
+                const batchOutputPath = path.join(WORK_DIR, `layer_${jobId}_${b}.mp4`);
                 generatedFiles.push(batchOutputPath);
 
-                console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} (${batchOverlays.length} assets) ---`);
+                // --- JUST IN TIME DOWNLOAD ---
+                for (let action of batchOverlays) {
+                    if (action.url) {
+                        const ext = path.extname(action.asset_name || '').toLowerCase() || '.png';
+                        const localPath = path.join(WORK_DIR, `asset_${jobId}_${b}${ext}`);
+                        console.log(`[Job ${jobId}] [Layer ${b + 1}] Downloading asset Just-In-Time...`);
+                        await downloadFile(action.url, localPath, jobId);
+                        action.localPath = localPath;
+                        action.isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
+                        action.isGif = ext === '.gif';
+                    }
+                }
+
+                console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} ---`);
                 
                 let command = ffmpeg(currentVideo).renice(15); 
                 command.inputOptions(['-thread_queue_size', '512', '-threads', '1']);
@@ -228,16 +232,9 @@ async function processQueue() {
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
                         let options = ['-thread_queue_size', '256', '-threads', '1']; 
-                        
-                        // NEW VIDEO LOOPING LOGIC
-                        if (action.isGif) {
-                            options.push('-ignore_loop', '0'); // Legacy GIF looping
-                        } else if (action.isVideo) {
-                            options.push('-stream_loop', '-1'); // Infinite looping for MP4/WebM
-                        } else {
-                            options.push('-loop', '1'); // Static image looping
-                        }
-                        
+                        if (action.isGif) options.push('-ignore_loop', '0'); 
+                        else if (action.isVideo) options.push('-stream_loop', '-1'); 
+                        else options.push('-loop', '1'); 
                         command.input(action.localPath).inputOptions(options);
                     }
                 });
@@ -245,11 +242,8 @@ async function processQueue() {
                 let complexFilters = [];
                 let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '9999'];
 
-                if (isLastBatch) {
-                    outputOptions.push('-c:v libx264', '-crf 22', '-preset ultrafast');
-                } else {
-                    outputOptions.push('-c:v libx264', '-crf 16', '-preset ultrafast');
-                }
+                if (isLastBatch) outputOptions.push('-c:v libx264', '-crf 22', '-preset ultrafast');
+                else outputOptions.push('-c:v libx264', '-crf 16', '-preset ultrafast');
 
                 if (b === 0) {
                     outputOptions.push('-c:a aac');
@@ -267,15 +261,11 @@ async function processQueue() {
                 if (batchOverlays.length > 0) {
                     let currentVidNode = '[0:v]';
                     batchOverlays.forEach((action, idx) => {
-                        const nextVidNode = idx === batchOverlays.length - 1 ? '[outv]' : `[v${idx + 1}]`;
-                        const inputIdx = idx + 1;
-                        const scaledNode = `[scaled_v${idx + 1}]`;
+                        const nextVidNode = '[outv]';
+                        const scaledNode = `[scaled_v1]`;
                         const MAX_W = parseInt(action.max_width) || 800, MAX_H = parseInt(action.max_height) || 800;
-                        const startT = parseFloat(action.start_time), endT = parseFloat(action.end_time);
-
-                        complexFilters.push(`[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
-                        complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startT},${endT})':eof_action=pass${nextVidNode}`);
-                        currentVidNode = nextVidNode;
+                        complexFilters.push(`[1:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
+                        complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${parseFloat(action.start_time)},${parseFloat(action.end_time)})':eof_action=pass${nextVidNode}`);
                     });
                     outputOptions.push('-map [outv]');
                 } else {
@@ -287,35 +277,43 @@ async function processQueue() {
 
                 await new Promise((resolve, reject) => {
                     let lastLogTime = 0; 
-                    command.on('start', (cmdLine) => {
-                        console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`);
-                    })
+                    command.on('start', () => console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`))
                     .on('progress', (progress) => {
                         const now = Date.now();
                         if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
-                            const mem = process.memoryUsage();
-                            const cpuLoad = os.loadavg()[0].toFixed(1);
-                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0   `);
+                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(0)}MB`);
                             lastLogTime = now;
                         }
                     })
-                    .on('error', (err, stdout, stderr) => {
-                        console.error(`\n[Job ${jobId}] [Layer ${b + 1}] FFmpeg FAILED`);
-                        if (stderr) console.error(`\n================ STDERR ================\n${stderr}\n=======================================\n`);
-                        reject(err);
-                    })
+                    .on('error', (err) => reject(err))
                     .on('end', () => {
-                        console.log(`\n[Job ${jobId}] [Layer ${b + 1}] Completed Successfully.`);
+                        console.log(`\n[Job ${jobId}] [Layer ${b + 1}] Completed.`);
                         resolve();
                     });
 
                     command.save(batchOutputPath);
                 });
 
-                if (b > 0) fs.unlinkSync(currentVideo); 
+                // ==========================================
+                // AGGRESSIVE JIT MEMORY CLEANUP
+                // ==========================================
+                const prevVideo = currentVideo; 
                 currentVideo = batchOutputPath;
+                command = null; // Free FFmpeg object from memory
                 
-                console.log(`\n[Job ${jobId}] Resting for 4 seconds to allow RAM Garbage Collection...`);
+                // Aggressively delete the previous base video (even if it is the raw 500MB input)
+                if (fs.existsSync(prevVideo)) {
+                    try { fs.unlinkSync(prevVideo); } catch(e) {}
+                }
+
+                // Instantly delete the MP4 overlay asset to clear buffer cache
+                batchOverlays.forEach(action => {
+                    if (action.localPath && fs.existsSync(action.localPath)) {
+                        try { fs.unlinkSync(action.localPath); action.localPath = null; } catch (e) {}
+                    }
+                });
+
+                if (global.gc) global.gc(); // Force V8 to clear the memory
                 await new Promise(r => setTimeout(r, 4000));
             }
         }
@@ -326,9 +324,8 @@ async function processQueue() {
             console.log(`\n[Job ${jobId}] === Phase 3: Performing jump cuts ===`);
             let filterComplex = '', concatInputs = '';
             keep_segments.forEach((seg, i) => {
-                const start = parseFloat(seg.start), end = parseFloat(seg.end);
-                filterComplex += `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${i}]; `;
-                filterComplex += `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${i}]; `;
+                filterComplex += `[0:v]trim=start=${parseFloat(seg.start)}:end=${parseFloat(seg.end)},setpts=PTS-STARTPTS[v${i}]; `;
+                filterComplex += `[0:a]atrim=start=${parseFloat(seg.start)}:end=${parseFloat(seg.end)},asetpts=PTS-STARTPTS[a${i}]; `;
                 concatInputs += `[v${i}][a${i}]`;
             });
             filterComplex += `${concatInputs}concat=n=${keep_segments.length}:v=1:a=1[outv][outa]`;
@@ -343,25 +340,17 @@ async function processQueue() {
                 command.on('progress', (progress) => {
                         const now = Date.now();
                         if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
-                            const mem = process.memoryUsage();
-                            const cpuLoad = os.loadavg()[0].toFixed(1);
-                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | CPU: ${cpuLoad}/8.0   `);
+                            process.stdout.write(`\r[Job ${jobId}] [Phase 3] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(0)}MB`);
                             lastLogTime = now;
                         }
                     })
-                    .on('error', (err, stdout, stderr) => {
-                        console.error(`\n[Job ${jobId}] [Phase 3] FFmpeg FAILED`);
-                        if (stderr) console.error(`STDERR:\n${stderr}`);
-                        reject(err);
-                    })
-                    .on('end', () => {
-                        console.log(`\n[Job ${jobId}] [Phase 3] Completed Successfully.`);
-                        resolve();
-                    });
+                    .on('error', (err) => reject(err))
+                    .on('end', () => resolve());
 
                 command.save(finalPath);
             });
             currentVideo = finalPath;
+            command = null;
         }
 
         if (webhookUrl) {
@@ -369,21 +358,19 @@ async function processQueue() {
             const fileStream = fs.createReadStream(currentVideo);
             await axios.post(webhookUrl, fileStream, {
                 headers: { 'Content-Type': 'video/mp4' },
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity
+                maxContentLength: Infinity, maxBodyLength: Infinity
             });
             console.log(`[Job ${jobId}] Webhook delivered successfully!`);
-        } else {
-            console.log(`[Job ${jobId}] No webhook provided. Task completed locally.`);
         }
 
     } catch (error) {
-        console.error(`\n[Job ${jobId}] Critical Global Error:`, error.message);
+        console.error(`\n[Job ${jobId}] Critical Error:`, error.message);
     } finally {
-        console.log(`\n[Job ${jobId}] Cleaning up temporary files...`);
+        console.log(`\n[Job ${jobId}] Cleaning up final temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
-        
+        activeTask = null;
         isProcessing = false;
+        if (global.gc) global.gc();
         processQueue(); 
     }
 }
@@ -392,7 +379,6 @@ app.post('/render', (req, res) => {
     const jobId = randomUUID();
     res.status(202).json({ message: "Job added to queue. Rendering in background...", jobId: jobId });
     jobQueue.push({ ...req.body, jobId });
-    console.log(`[System] Job ${jobId} added to queue. Position: ${jobQueue.length}`);
     processQueue();
 });
 
