@@ -7,16 +7,20 @@ const os = require('os');
 const { randomUUID } = require('crypto');
 const { createCanvas, loadImage } = require('canvas');
 
-const WORK_DIR = os.tmpdir(); 
+// INFRASTRUCTURE FIX: Automatically use persistent volume if attached to prevent Disk Eviction
+let WORK_DIR = os.tmpdir();
+if (fs.existsSync('/app/workspace')) {
+    WORK_DIR = '/app/workspace';
+    console.log('[System] Persistent Railway Volume detected. Routing all video data to /app/workspace');
+}
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-// Required for Railway automated health checks to prevent phantom SIGTERMs
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.5 (Bitrate-Capped Production Final) is active!");
+    res.send("Multifunctional AI Video Worker v14.7 (The Final Architecture) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -24,13 +28,7 @@ app.get('/status', (req, res) => {
         status: 'running',
         queueLength: jobQueue.length,
         isProcessing: isProcessing,
-        uptime: process.uptime(),
-        cpuLoad1Min: os.loadavg()[0].toFixed(2),
-        memoryUsageMB: {
-            rss: (process.memoryUsage().rss / 1024 / 1024).toFixed(1),
-            heapTotal: (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1),
-            heapUsed: (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1),
-        }
+        uptime: process.uptime()
     });
 });
 
@@ -44,7 +42,7 @@ process.on('SIGTERM', async () => {
         console.log(`[System] Notifying n8n webhook to abort Wait node for Job ${activeTask.jobId}...`);
         try {
             await axios.post(activeTask.webhookUrl, { 
-                error: 'Worker terminated by platform (SIGTERM / OOM)',
+                error: 'Worker terminated by platform (SIGTERM / Hard Timeout)',
                 jobId: activeTask.jobId,
                 status: "failed"
             });
@@ -154,7 +152,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.5 PRODUCTION RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.7 FINAL RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -228,7 +226,9 @@ async function processQueue() {
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} ---`);
                 
                 let command = ffmpeg(currentVideo).renice(15); 
-                command.inputOptions(['-thread_queue_size', '512', '-threads', '1']);
+                
+                // CORRECTED: Apply thread choke to the base video
+                command.inputOptions(['-thread_queue_size', '64', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
                     if (action.localPath) {
@@ -243,7 +243,6 @@ async function processQueue() {
                 let complexFilters = [];
                 let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '1024'];
 
-                // Force FFmpeg to compress the video and cap the bitrate to prevent file bloat
                 outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 4M', '-bufsize 8M');
 
                 if (b === 0) {
@@ -379,5 +378,11 @@ app.post('/render', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-// BIND TO 0.0.0.0 TO ALLOW RAILWAY HEALTH CHECKS
 app.listen(PORT, '0.0.0.0', () => console.log(`Multifunctional AI Video Worker running on port ${PORT} (Bound to 0.0.0.0)`));
+
+// INFRASTRUCTURE FIX: Heartbeat ping to prevent Railway's "Idle Sleep" feature from assassinating the container
+if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    setInterval(() => {
+        axios.get(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`).catch(() => {});
+    }, 120000); // Ping self every 2 minutes
+}
