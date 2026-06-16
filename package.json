@@ -1,14 +1,16 @@
 {
-  "name": "n8n-video-worker",
-  "version": "1.0.0",
+  "name": "n8n-ffmpeg-worker",
+  "version": "15.0.0",
+  "description": "Enterprise Video Processing worker for n8n pipelines",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.500.0",
+    "axios": "^1.6.7",
+    "canvas": "^2.11.2",
     "express": "^4.18.2",
-    "fluent-ffmpeg": "^2.1.3",
-    "axios": "^1.6.0",
-    "canvas": "^2.11.2"
+    "fluent-ffmpeg": "^2.1.2"
   }
 }
