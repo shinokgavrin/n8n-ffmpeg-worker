@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const { randomUUID } = require('crypto');
 const { createCanvas, loadImage } = require('canvas');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 // INFRASTRUCTURE FIX: Automatically use persistent volume if attached to prevent Disk Eviction
 let WORK_DIR = os.tmpdir();
@@ -20,7 +21,7 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.9 (Smart Idle & Bulletproof) is active!");
+    res.send("Multifunctional AI Video Worker v15.0 (R2 Cloud Webhook Edition) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -51,6 +52,42 @@ process.on('SIGTERM', async () => {
     }
     process.exit(0);
 });
+
+// Upgraded R2 Uploader
+async function uploadToR2(filePath, fileName) {
+    if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !process.env.R2_BUCKET_NAME || !process.env.R2_PUBLIC_URL) {
+        throw new Error("Missing Cloudflare R2 environment variables. Cannot perform R2 upload.");
+    }
+
+    const cleanEndpoint = process.env.R2_ENDPOINT.startsWith('https://') 
+        ? process.env.R2_ENDPOINT 
+        : `https://${process.env.R2_ENDPOINT}`;
+
+    const s3 = new S3Client({
+        region: 'auto',
+        endpoint: cleanEndpoint,
+        credentials: {
+            accessKeyId: process.env.R2_ACCESS_KEY_ID,
+            secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
+        }
+    });
+
+    const fileStream = fs.createReadStream(filePath);
+    const stats = fs.statSync(filePath);
+
+    const command = new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: `renders/${fileName}`,
+        Body: fileStream,
+        ContentLength: stats.size,
+        ContentType: 'video/mp4'
+    });
+
+    await s3.send(command);
+
+    const r2UrlBase = process.env.R2_PUBLIC_URL.replace(/\/$/, ''); 
+    return `${r2UrlBase}/renders/${fileName}`;
+}
 
 // UPGRADED JIT DOWNLOADER: Catches fake videos, HTML pages, and broken URLs
 async function downloadFile(url, dest, jobId = '') {
@@ -168,7 +205,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.9 SMART RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V15.0 SMART RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -242,8 +279,6 @@ async function processQueue() {
                 console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} ---`);
                 
                 let command = ffmpeg(currentVideo).renice(15); 
-                
-                // Base video queue choked correctly
                 command.inputOptions(['-thread_queue_size', '64', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
@@ -258,7 +293,6 @@ async function processQueue() {
 
                 let complexFilters = [];
                 let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '1024'];
-
                 outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 4M', '-bufsize 8M');
 
                 if (b === 0) {
@@ -364,20 +398,43 @@ async function processQueue() {
             command = null;
         }
 
+        // PHASE 4: CDN UPLOAD & LIGHTWEIGHT WEBHOOK WEB-SIGNAL
+        let outputUrl = null;
+        const isR2Configured = process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_ENDPOINT;
+
+        if (isR2Configured) {
+            console.log(`\n[Job ${jobId}] Phase 4: Uploading finalized video to Cloudflare R2...`);
+            const r2FileName = `render_${jobId}_${Date.now()}.mp4`;
+            outputUrl = await uploadToR2(currentVideo, r2FileName);
+            console.log(`[Job ${jobId}] Upload successful. R2 Public CDN Link: ${outputUrl}`);
+        } else {
+            console.log(`\n[Job ${jobId}] Phase 4: R2 credentials missing. Falling back to classic raw binary transfer...`);
+        }
+
         if (webhookUrl) {
-            console.log(`\n[Job ${jobId}] Sending video to webhook: ${webhookUrl}`);
-            const fileStream = fs.createReadStream(currentVideo);
-            await axios.post(webhookUrl, fileStream, {
-                headers: { 'Content-Type': 'video/mp4' },
-                maxContentLength: Infinity, maxBodyLength: Infinity
-            });
-            console.log(`[Job ${jobId}] Webhook delivered successfully!`);
+            if (outputUrl) {
+                console.log(`[Job ${jobId}] Delivering lightweight JSON webhook to n8n (Size: ~150 Bytes)...`);
+                await axios.post(webhookUrl, {
+                    status: "success",
+                    jobId: jobId,
+                    videoUrl: outputUrl,
+                    currentVideoUrl: outputUrl // Compatibility tag for loop variable
+                });
+                console.log(`[Job ${jobId}] Webhook JSON signal delivered successfully!`);
+            } else {
+                console.log(`[Job ${jobId}] Streaming massive video back to n8n webhook (Warning: Large files might crash with 502/Proxy limit)...`);
+                const fileStream = fs.createReadStream(currentVideo);
+                await axios.post(webhookUrl, fileStream, {
+                    headers: { 'Content-Type': 'video/mp4' },
+                    maxContentLength: Infinity, maxBodyLength: Infinity
+                });
+                console.log(`[Job ${jobId}] Webhook binary stream delivered.`);
+            }
         }
 
     } catch (error) {
         console.error(`\n[Job ${jobId}] Critical Error:`, error.message);
         
-        // CRITICAL FIX: The Failure Webhook pipeline
         if (webhookUrl) {
             console.log(`[Job ${jobId}] Sending failure notice back to n8n webhook...`);
             await axios.post(webhookUrl, { 
@@ -408,14 +465,12 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Multifunctional AI Video Worker running on port ${PORT} (Bound to 0.0.0.0)`));
 
 // INFRASTRUCTURE FIX: Smart Heartbeat
-// Only keeps the container awake IF there is active work to do.
 if (process.env.RAILWAY_PUBLIC_DOMAIN) {
     setInterval(() => {
-        // Only ping if a video is actively rendering or waiting in the queue
         if (isProcessing || jobQueue.length > 0) {
             axios.get(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`).catch(() => {});
         } else {
             console.log("[System] Queue is empty. Allowing Railway idle timer to run...");
         }
-    }, 120000); // Check every 2 minutes
+    }, 120000); 
 }
