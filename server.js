@@ -21,7 +21,7 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v15.0 (R2 Cloud Webhook Edition) is active!");
+    res.send("Multifunctional AI Video Worker v15.1 (Premium Transitions & Custom Delay) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -205,7 +205,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V15.0 SMART RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V15.1 SMART RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -313,9 +313,26 @@ async function processQueue() {
                     batchOverlays.forEach((action, idx) => {
                         const nextVidNode = '[outv]';
                         const scaledNode = `[scaled_v1]`;
-                        const MAX_W = parseInt(action.max_width) || 800, MAX_H = parseInt(action.max_height) || 800;
-                        complexFilters.push(`[1:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease'${scaledNode}`);
-                        complexFilters.push(`${currentVidNode}${scaledNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${parseFloat(action.start_time)},${parseFloat(action.end_time)})':eof_action=pass${nextVidNode}`);
+                        const fadedNode = `[faded_v1]`;
+                        const MAX_W = parseInt(action.max_width) || 1080;
+                        const MAX_H = parseInt(action.max_height) || 1080;
+                        const startTime = parseFloat(action.start_time);
+                        const endTime = parseFloat(action.end_time);
+                        const duration = endTime - startTime;
+                        
+                        // Premium smooth fade transition window calculation
+                        const fadeDuration = Math.min(0.4, duration / 3.5); 
+
+                        // 1. Scale, format to transparent space, shift timeline via PTS, and apply fade transitions
+                        let filter = `[1:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease',format=pix_fmts=yuva420p`;
+                        filter += `,setpts=PTS-STARTPTS+${startTime}/TB`;
+                        filter += `,fade=type=in:start_time=${startTime}:duration=${fadeDuration}:alpha=1`;
+                        filter += `,fade=type=out:start_time=${(endTime - fadeDuration).toFixed(3)}:duration=${fadeDuration}:alpha=1${fadedNode}`;
+                        
+                        complexFilters.push(filter);
+                        
+                        // 2. Overlay with custom coordinates and absolute execution timeframe mapping
+                        complexFilters.push(`${currentVidNode}${fadedNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startTime},${endTime})':eof_action=pass${nextVidNode}`);
                     });
                     outputOptions.push('-map [outv]');
                 } else {
