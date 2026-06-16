@@ -20,7 +20,7 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.7 (The Final Architecture) is active!");
+    res.send("Multifunctional AI Video Worker v14.8 (Bulletproof Final) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -52,15 +52,31 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
+// UPGRADED JIT DOWNLOADER: Catches fake videos, HTML pages, and broken URLs
 async function downloadFile(url, dest, jobId = '') {
     let attempts = 0;
     const maxAttempts = 6;
     while (attempts < maxAttempts) {
         try {
             const response = await axios({ url, responseType: 'stream', timeout: 90000, maxRedirects: 5 });
+            
+            // SECURITY CHECK 1: Ensure it's not a webpage
+            const contentType = response.headers['content-type'] || '';
+            if (contentType.includes('text/html')) {
+                throw new Error(`The URL provided a webpage (HTML), not a raw media file: ${url}`);
+            }
+
             const writer = fs.createWriteStream(dest);
             response.data.pipe(writer);
             await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+            
+            // SECURITY CHECK 2: Ensure it has physical weight (not a fake/empty file)
+            const stats = fs.statSync(dest);
+            if (stats.size < 10240) { // Less than 10KB is statistically impossible for a video
+                fs.unlinkSync(dest); 
+                throw new Error(`The downloaded file is impossibly small (${stats.size} bytes). It is likely an expired link or a login wall masquerading as a video: ${url}`);
+            }
+
             return;
         } catch (err) {
             attempts++;
@@ -152,7 +168,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.7 FINAL RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.8 BULLETPROOF RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -227,7 +243,7 @@ async function processQueue() {
                 
                 let command = ffmpeg(currentVideo).renice(15); 
                 
-                // CORRECTED: Apply thread choke to the base video
+                // FIXED: Base video queue choked correctly
                 command.inputOptions(['-thread_queue_size', '64', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
@@ -360,6 +376,17 @@ async function processQueue() {
 
     } catch (error) {
         console.error(`\n[Job ${jobId}] Critical Error:`, error.message);
+        
+        // CRITICAL FIX: The Failure Webhook pipeline
+        if (webhookUrl) {
+            console.log(`[Job ${jobId}] Sending failure notice back to n8n webhook...`);
+            await axios.post(webhookUrl, { 
+                error: error.message, 
+                jobId: jobId, 
+                status: "failed" 
+            }).catch(e => console.log(`[Job ${jobId}] Failed to deliver error webhook.`));
+        }
+
     } finally {
         console.log(`\n[Job ${jobId}] Cleaning up final temporary files...`);
         generatedFiles.forEach(file => { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {} });
