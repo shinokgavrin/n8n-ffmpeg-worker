@@ -20,7 +20,7 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v14.8 (Bulletproof Final) is active!");
+    res.send("Multifunctional AI Video Worker v14.9 (Smart Idle & Bulletproof) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -168,7 +168,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V14.8 BULLETPROOF RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V14.9 SMART RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -243,7 +243,7 @@ async function processQueue() {
                 
                 let command = ffmpeg(currentVideo).renice(15); 
                 
-                // FIXED: Base video queue choked correctly
+                // Base video queue choked correctly
                 command.inputOptions(['-thread_queue_size', '64', '-threads', '1']);
 
                 batchOverlays.forEach(action => {
@@ -407,9 +407,15 @@ app.post('/render', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`Multifunctional AI Video Worker running on port ${PORT} (Bound to 0.0.0.0)`));
 
-// INFRASTRUCTURE FIX: Heartbeat ping to prevent Railway's "Idle Sleep" feature from assassinating the container
+// INFRASTRUCTURE FIX: Smart Heartbeat
+// Only keeps the container awake IF there is active work to do.
 if (process.env.RAILWAY_PUBLIC_DOMAIN) {
     setInterval(() => {
-        axios.get(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`).catch(() => {});
-    }, 120000); // Ping self every 2 minutes
+        // Only ping if a video is actively rendering or waiting in the queue
+        if (isProcessing || jobQueue.length > 0) {
+            axios.get(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`).catch(() => {});
+        } else {
+            console.log("[System] Queue is empty. Allowing Railway idle timer to run...");
+        }
+    }, 120000); // Check every 2 minutes
 }
