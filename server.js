@@ -255,129 +255,121 @@ async function processQueue() {
         }
         
         if (muteActions.length > 0 || overlayActions.length > 0) {
-            console.log(`\n[Job ${jobId}] === Phase 2: Overlay Processing ===`);
+            console.log(`\n[Job ${jobId}] === Phase 2: Parallel Overlay Processing ===`);
             
-            const totalBatches = overlayActions.length > 0 ? overlayActions.length : 1;
+            const batchOutputPath = path.join(WORK_DIR, `layered_batch_${jobId}.mp4`);
+            generatedFiles.push(batchOutputPath);
 
-            for (let b = 0; b < totalBatches; b++) {
-                const batchOverlays = overlayActions.slice(b, b + 1);
-                const batchOutputPath = path.join(WORK_DIR, `layer_${jobId}_${b}.mp4`);
-                generatedFiles.push(batchOutputPath);
-
-                for (let action of batchOverlays) {
-                    if (action.url) {
-                        const ext = path.extname(action.asset_name || '').toLowerCase() || '.png';
-                        const localPath = path.join(WORK_DIR, `asset_${jobId}_${b}${ext}`);
-                        console.log(`[Job ${jobId}] [Layer ${b + 1}] Downloading asset Just-In-Time...`);
-                        await downloadFile(action.url, localPath, jobId);
-                        action.localPath = localPath;
-                        action.isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
-                        action.isGif = ext === '.gif';
-                    }
+            // 1. Download ALL overlay assets for this batch in parallel first
+            for (let i = 0; i < overlayActions.length; i++) {
+                let action = overlayActions[i];
+                if (action.url) {
+                    const ext = path.extname(action.asset_name || '').toLowerCase() || '.png';
+                    const localPath = path.join(WORK_DIR, `asset_${jobId}_${i}${ext}`);
+                    console.log(`[Job ${jobId}] Downloading asset ${i + 1}/${overlayActions.length} JIT...`);
+                    await downloadFile(action.url, localPath, jobId);
+                    action.localPath = localPath;
+                    action.isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
+                    action.isGif = ext === '.gif';
                 }
-
-                console.log(`\n[Job ${jobId}] --- Applying Layer ${b + 1}/${totalBatches} ---`);
-                
-                let command = ffmpeg(currentVideo).renice(15); 
-                command.inputOptions(['-thread_queue_size', '64', '-threads', '1']);
-
-                batchOverlays.forEach(action => {
-                    if (action.localPath) {
-                        let options = ['-thread_queue_size', '64', '-threads', '1']; 
-                        if (action.isGif) options.push('-ignore_loop', '0'); 
-                        else if (action.isVideo) options.push('-stream_loop', '-1'); 
-                        else options.push('-loop', '1'); 
-                        command.input(action.localPath).inputOptions(options);
-                    }
-                });
-
-                let complexFilters = [];
-                let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '1', '-filter_threads', '1', '-max_muxing_queue_size', '1024'];
-                outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 4M', '-bufsize 8M');
-
-                if (b === 0) {
-                    outputOptions.push('-c:a aac');
-                    if (muteActions.length > 0) {
-                        const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
-                        complexFilters.push(`[0:a]${volumeFilters}[outa]`);
-                        outputOptions.push('-map [outa]');
-                    } else {
-                        outputOptions.push('-map 0:a');
-                    }
-                } else {
-                    outputOptions.push('-c:a copy', '-map 0:a');
-                }
-
-                if (batchOverlays.length > 0) {
-                    let currentVidNode = '[0:v]';
-                    batchOverlays.forEach((action, idx) => {
-                        const nextVidNode = '[outv]';
-                        const scaledNode = `[scaled_v1]`;
-                        const fadedNode = `[faded_v1]`;
-                        const MAX_W = parseInt(action.max_width) || 1080;
-                        const MAX_H = parseInt(action.max_height) || 1080;
-                        const startTime = parseFloat(action.start_time);
-                        const endTime = parseFloat(action.end_time);
-                        const duration = endTime - startTime;
-                        
-                        // Premium smooth fade transition window calculation
-                        const fadeDuration = Math.min(0.4, duration / 3.5); 
-
-                        // 1. Scale, format to transparent space, shift timeline via PTS, and apply fade transitions
-                        let filter = `[1:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease',format=pix_fmts=yuva420p`;
-                        filter += `,setpts=PTS-STARTPTS+${startTime}/TB`;
-                        filter += `,fade=type=in:start_time=${startTime}:duration=${fadeDuration}:alpha=1`;
-                        filter += `,fade=type=out:start_time=${(endTime - fadeDuration).toFixed(3)}:duration=${fadeDuration}:alpha=1${fadedNode}`;
-                        
-                        complexFilters.push(filter);
-                        
-                        // 2. Overlay with custom coordinates and absolute execution timeframe mapping
-                        complexFilters.push(`${currentVidNode}${fadedNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startTime},${endTime})':eof_action=pass${nextVidNode}`);
-                    });
-                    outputOptions.push('-map [outv]');
-                } else {
-                    outputOptions.push('-map 0:v');
-                }
-
-                if (complexFilters.length > 0) command.complexFilter(complexFilters);
-                command.outputOptions(outputOptions);
-
-                await new Promise((resolve, reject) => {
-                    let lastLogTime = 0; 
-                    command.on('start', () => console.log(`[Job ${jobId}] [Layer ${b + 1}] Executing FFmpeg command...`))
-                    .on('progress', (progress) => {
-                        const now = Date.now();
-                        if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
-                            process.stdout.write(`\r[Job ${jobId}] [Layer ${b + 1}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(0)}MB`);
-                            lastLogTime = now;
-                        }
-                    })
-                    .on('error', (err) => reject(err))
-                    .on('end', () => {
-                        console.log(`\n[Job ${jobId}] [Layer ${b + 1}] Completed.`);
-                        resolve();
-                    });
-
-                    command.save(batchOutputPath);
-                });
-
-                const prevVideo = currentVideo; 
-                currentVideo = batchOutputPath;
-                command = null; 
-                
-                if (fs.existsSync(prevVideo)) {
-                    try { fs.unlinkSync(prevVideo); } catch(e) {}
-                }
-
-                batchOverlays.forEach(action => {
-                    if (action.localPath && fs.existsSync(action.localPath)) {
-                        try { fs.unlinkSync(action.localPath); action.localPath = null; } catch (e) {}
-                    }
-                });
-
-                if (global.gc) global.gc(); 
-                await new Promise(r => setTimeout(r, 4000));
             }
+
+            console.log(`\n[Job ${jobId}] --- Rendering All ${overlayActions.length} Overlays in ONE Pass ---`);
+            
+            let command = ffmpeg(currentVideo).renice(15); 
+            command.inputOptions(['-thread_queue_size', '1024', '-threads', '4']);
+
+            // 2. Map all downloaded files as parallel inputs to FFmpeg
+            overlayActions.forEach(action => {
+                if (action.localPath) {
+                    let options = ['-thread_queue_size', '1024']; 
+                    if (action.isGif) options.push('-ignore_loop', '0'); 
+                    else if (action.isVideo) options.push('-stream_loop', '-1'); 
+                    else options.push('-loop', '1'); 
+                    command.input(action.localPath).inputOptions(options);
+                }
+            });
+
+            let complexFilters = [];
+            let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '4', '-filter_threads', '4', '-max_muxing_queue_size', '2048'];
+            outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 6M', '-bufsize 12M');
+
+            // 3. Chain mutes on the audio channel
+            outputOptions.push('-c:a aac');
+            if (muteActions.length > 0) {
+                const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
+                complexFilters.push(`[0:a]${volumeFilters}[outa]`);
+                outputOptions.push('-map [outa]');
+            } else {
+                outputOptions.push('-map 0:a');
+            }
+
+            // 4. Build single chained complex video filter
+            if (overlayActions.length > 0) {
+                let currentVidNode = '[0:v]';
+                overlayActions.forEach((action, idx) => {
+                    const inputIdx = idx + 1; // 0 is original video, so inputs are 1, 2, 3...
+                    const fadedNode = `[faded_${idx}]`;
+                    const nextVidNode = idx === overlayActions.length - 1 ? '[outv]' : `[v_temp_${idx}]`;
+                    
+                    const MAX_W = parseInt(action.max_width) || 1080;
+                    const MAX_H = parseInt(action.max_height) || 1080;
+                    const startTime = parseFloat(action.start_time);
+                    const endTime = parseFloat(action.end_time);
+                    const duration = endTime - startTime;
+                    
+                    const fadeDuration = Math.min(0.4, duration / 3.5); 
+
+                    // Scale, timestamp shift, and apply fade transitions for this input index
+                    let filter = `[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease',format=pix_fmts=yuva420p`;
+                    filter += `,setpts=PTS-STARTPTS+${startTime}/TB`;
+                    filter += `,fade=type=in:start_time=${startTime}:duration=${fadeDuration}:alpha=1`;
+                    filter += `,fade=type=out:start_time=${(endTime - fadeDuration).toFixed(3)}:duration=${fadeDuration}:alpha=1${fadedNode}`;
+                    
+                    complexFilters.push(filter);
+                    
+                    // Overlay this faded stream onto our running video node
+                    complexFilters.push(`${currentVidNode}${fadedNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startTime},${endTime})':eof_action=pass${nextVidNode}`);
+                    currentVidNode = nextVidNode;
+                });
+                outputOptions.push('-map [outv]');
+            } else {
+                outputOptions.push('-map 0:v');
+            }
+
+            if (complexFilters.length > 0) command.complexFilter(complexFilters);
+            command.outputOptions(outputOptions);
+
+            await new Promise((resolve, reject) => {
+                let lastLogTime = 0; 
+                command.on('start', () => console.log(`[Job ${jobId}] Executing single-pass FFmpeg command...`))
+                .on('progress', (progress) => {
+                    const now = Date.now();
+                    if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
+                        process.stdout.write(`\r[Job ${jobId}] Progress: ${progress.percent.toFixed(1)}% | RSS: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(0)}MB`);
+                        lastLogTime = now;
+                    }
+                })
+                .on('error', (err) => reject(err))
+                .on('end', () => {
+                    console.log(`\n[Job ${jobId}] Render completed.`);
+                    resolve();
+                });
+
+                command.save(batchOutputPath);
+            });
+
+            currentVideo = batchOutputPath;
+            command = null; 
+
+            // Cleanup local overlay files
+            overlayActions.forEach(action => {
+                if (action.localPath && fs.existsSync(action.localPath)) {
+                    try { fs.unlinkSync(action.localPath); action.localPath = null; } catch (e) {}
+                }
+            });
+
+            if (global.gc) global.gc(); 
         }
 
         // PHASE 3: JUMP CUTS
