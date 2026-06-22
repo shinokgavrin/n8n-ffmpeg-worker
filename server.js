@@ -21,7 +21,7 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.status(200).send("OK"));
 
 app.get('/debug', (req, res) => {
-    res.send("Multifunctional AI Video Worker v15.1 (Premium Transitions & Custom Delay) is active!");
+    res.send("Multifunctional AI Video Worker v15.5 (Cinematic TTS Audio Mixing) is active!");
 });
 
 app.get('/status', (req, res) => {
@@ -107,11 +107,11 @@ async function downloadFile(url, dest, jobId = '') {
             response.data.pipe(writer);
             await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
             
-            // SECURITY CHECK 2: Ensure it has physical weight (not a fake/empty file)
+            // SECURITY CHECK 2: Ensure it has physical weight (not an empty file)
             const stats = fs.statSync(dest);
-            if (stats.size < 10240) { // Less than 10KB is statistically impossible for a video
+            if (stats.size < 1000) { // Tiny files are errors
                 fs.unlinkSync(dest); 
-                throw new Error(`The downloaded file is impossibly small (${stats.size} bytes). It is likely an expired link or a login wall masquerading as a video: ${url}`);
+                throw new Error(`The downloaded file is impossibly small (${stats.size} bytes). It is likely an expired link: ${url}`);
             }
 
             return;
@@ -205,7 +205,7 @@ async function processQueue() {
 
     try {
         console.log(`\n======================================================`);
-        console.log(`[Job ${jobId}] === STARTING V15.1 SMART RENDER ===`);
+        console.log(`[Job ${jobId}] === STARTING V15.5 AUDIO-MIX RENDER ===`);
         console.log(`[Job ${jobId}] Queue Status: ${jobQueue.length} jobs remaining.`);
         console.log(`======================================================\n`);
         
@@ -247,7 +247,7 @@ async function processQueue() {
             currentVideo = burnedPath;
         }
 
-        // PHASE 2: SAFE LAYERING 
+        // PHASE 2: SAFE LAYERING & MULTI-INPUT TTS AUDIO MIXING
         let muteActions = [], overlayActions = [];
         if (actions && Array.isArray(actions)) {
             muteActions = actions.filter(a => ['mute_title', 'mute'].includes(a.type));
@@ -255,18 +255,18 @@ async function processQueue() {
         }
         
         if (muteActions.length > 0 || overlayActions.length > 0) {
-            console.log(`\n[Job ${jobId}] === Phase 2: Parallel Overlay Processing ===`);
+            console.log(`\n[Job ${jobId}] === Phase 2: Parallel Overlay & TTS Audio Processing ===`);
             
             const batchOutputPath = path.join(WORK_DIR, `layered_batch_${jobId}.mp4`);
             generatedFiles.push(batchOutputPath);
 
-            // 1. Download ALL overlay assets for this batch in parallel first
+            // 1. Download ALL graphic overlay assets in parallel first
             for (let i = 0; i < overlayActions.length; i++) {
                 let action = overlayActions[i];
                 if (action.url) {
                     const ext = path.extname(action.asset_name || '').toLowerCase() || '.png';
                     const localPath = path.join(WORK_DIR, `asset_${jobId}_${i}${ext}`);
-                    console.log(`[Job ${jobId}] Downloading asset ${i + 1}/${overlayActions.length} JIT...`);
+                    console.log(`[Job ${jobId}] Downloading overlay asset ${i + 1}/${overlayActions.length} JIT...`);
                     await downloadFile(action.url, localPath, jobId);
                     action.localPath = localPath;
                     action.isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
@@ -274,12 +274,22 @@ async function processQueue() {
                 }
             }
 
-            console.log(`\n[Job ${jobId}] --- Rendering All ${overlayActions.length} Overlays in ONE Pass ---`);
+            // 2. Download ALL generated TTS transition audio clips in parallel
+            let ttsActionsWithAudio = muteActions.filter(a => a.url);
+            for (let i = 0; i < ttsActionsWithAudio.length; i++) {
+                let action = ttsActionsWithAudio[i];
+                const localPath = path.join(WORK_DIR, `tts_${jobId}_${i}.mp3`);
+                console.log(`[Job ${jobId}] Downloading TTS transition track ${i + 1}/${ttsActionsWithAudio.length}...`);
+                await downloadFile(action.url, localPath, jobId);
+                action.localPath = localPath;
+            }
+
+            console.log(`\n[Job ${jobId}] --- Compiling Single-Pass Composite Filter Schema ---`);
             
             let command = ffmpeg(currentVideo).renice(15); 
             command.inputOptions(['-thread_queue_size', '1024', '-threads', '4']);
 
-            // 2. Map all downloaded files as parallel inputs to FFmpeg
+            // 3. Map Graphic Assets as Parallel Inputs
             overlayActions.forEach(action => {
                 if (action.localPath) {
                     let options = ['-thread_queue_size', '1024']; 
@@ -290,25 +300,48 @@ async function processQueue() {
                 }
             });
 
+            // 4. Map TTS Audio Assets as Parallel Inputs
+            ttsActionsWithAudio.forEach(action => {
+                command.input(action.localPath).inputOptions(['-thread_queue_size', '1024']);
+            });
+
             let complexFilters = [];
             let outputOptions = ['-pix_fmt yuv420p', '-shortest', '-threads', '4', '-filter_threads', '4', '-max_muxing_queue_size', '2048'];
             outputOptions.push('-c:v libx264', '-preset veryfast', '-crf 24', '-maxrate 6M', '-bufsize 12M');
-
-            // 3. Chain mutes on the audio channel
             outputOptions.push('-c:a aac');
+
+            // 5. AUDIO ROUTING: Mute the host, and mix in TTS audio tracks dynamically using adelay
+            let hostAudioNode = '[0:a]';
             if (muteActions.length > 0) {
                 const volumeFilters = muteActions.map(m => `volume=0:enable='between(t,${parseFloat(m.start_time)},${parseFloat(m.end_time)})'`).join(',');
-                complexFilters.push(`[0:a]${volumeFilters}[outa]`);
-                outputOptions.push('-map [outa]');
-            } else {
-                outputOptions.push('-map 0:a');
+                complexFilters.push(`[0:a]${volumeFilters}[muted_host]`);
+                hostAudioNode = '[muted_host]';
             }
 
-            // 4. Build single chained complex video filter
+            if (ttsActionsWithAudio.length > 0) {
+                let amixInputs = [hostAudioNode];
+                ttsActionsWithAudio.forEach((action, idx) => {
+                    const inputIdx = 1 + overlayActions.length + idx; // Offset inputs by the count of video overlays
+                    const startMs = Math.round(parseFloat(action.start_time) * 1000);
+                    const delayedNode = `[tts_${idx}]`;
+                    
+                    // Delay the TTS mono/stereo track to start at the exact muted timestamp
+                    complexFilters.push(`[${inputIdx}:a]adelay=${startMs}|${startMs}${delayedNode}`);
+                    amixInputs.push(delayedNode);
+                });
+
+                // Mix all delayed TTS inputs with our muted host channel
+                complexFilters.push(`${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=first:dropout_transition=0[mixed_audio]`);
+                outputOptions.push('-map [mixed_audio]');
+            } else {
+                outputOptions.push(`-map ${hostAudioNode}`);
+            }
+
+            // 6. VIDEO ROUTING: Chain Graphic Overlays
             if (overlayActions.length > 0) {
                 let currentVidNode = '[0:v]';
                 overlayActions.forEach((action, idx) => {
-                    const inputIdx = idx + 1; // 0 is original video, so inputs are 1, 2, 3...
+                    const inputIdx = idx + 1; 
                     const fadedNode = `[faded_${idx}]`;
                     const nextVidNode = idx === overlayActions.length - 1 ? '[outv]' : `[v_temp_${idx}]`;
                     
@@ -317,18 +350,14 @@ async function processQueue() {
                     const startTime = parseFloat(action.start_time);
                     const endTime = parseFloat(action.end_time);
                     const duration = endTime - startTime;
-                    
                     const fadeDuration = Math.min(0.4, duration / 3.5); 
 
-                    // Scale, timestamp shift, and apply fade transitions for this input index
-                    let filter = `[${inputIdx}:v]scale='min(${MAX_W},iw):min(${MAX_H},ih):force_original_aspect_ratio=decrease',format=pix_fmts=yuva420p`;
+                    let filter = `[${inputIdx}:v]scale='2*trunc(iw*min(${MAX_W}/iw\\,${MAX_H}/ih)/2):2*trunc(ih*min(${MAX_W}/iw\\,${MAX_H}/ih)/2)',format=pix_fmts=yuva420p`;
                     filter += `,setpts=PTS-STARTPTS+${startTime}/TB`;
                     filter += `,fade=type=in:start_time=${startTime}:duration=${fadeDuration}:alpha=1`;
                     filter += `,fade=type=out:start_time=${(endTime - fadeDuration).toFixed(3)}:duration=${fadeDuration}:alpha=1${fadedNode}`;
                     
                     complexFilters.push(filter);
-                    
-                    // Overlay this faded stream onto our running video node
                     complexFilters.push(`${currentVidNode}${fadedNode}overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${startTime},${endTime})':eof_action=pass${nextVidNode}`);
                     currentVidNode = nextVidNode;
                 });
@@ -342,7 +371,7 @@ async function processQueue() {
 
             await new Promise((resolve, reject) => {
                 let lastLogTime = 0; 
-                command.on('start', () => console.log(`[Job ${jobId}] Executing single-pass FFmpeg command...`))
+                command.on('start', () => console.log(`[Job ${jobId}] Executing composite single-pass audio/video overlay graph...`))
                 .on('progress', (progress) => {
                     const now = Date.now();
                     if (progress.percent && progress.percent > 0 && (now - lastLogTime > 2000)) {
@@ -352,7 +381,7 @@ async function processQueue() {
                 })
                 .on('error', (err) => reject(err))
                 .on('end', () => {
-                    console.log(`\n[Job ${jobId}] Render completed.`);
+                    console.log(`\n[Job ${jobId}] Composition completed.`);
                     resolve();
                 });
 
@@ -362,10 +391,15 @@ async function processQueue() {
             currentVideo = batchOutputPath;
             command = null; 
 
-            // Cleanup local overlay files
+            // Clean up temporary local files
             overlayActions.forEach(action => {
                 if (action.localPath && fs.existsSync(action.localPath)) {
-                    try { fs.unlinkSync(action.localPath); action.localPath = null; } catch (e) {}
+                    try { fs.unlinkSync(action.localPath); } catch (e) {}
+                }
+            });
+            ttsActionsWithAudio.forEach(action => {
+                if (action.localPath && fs.existsSync(action.localPath)) {
+                    try { fs.unlinkSync(action.localPath); } catch (e) {}
                 }
             });
 
@@ -407,7 +441,7 @@ async function processQueue() {
             command = null;
         }
 
-        // PHASE 4: CDN UPLOAD & LIGHTWEIGHT WEBHOOK WEB-SIGNAL
+        // PHASE 4: CDN UPLOAD
         let outputUrl = null;
         const isR2Configured = process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_ENDPOINT;
 
@@ -427,11 +461,11 @@ async function processQueue() {
                     status: "success",
                     jobId: jobId,
                     videoUrl: outputUrl,
-                    currentVideoUrl: outputUrl // Compatibility tag for loop variable
+                    currentVideoUrl: outputUrl 
                 });
                 console.log(`[Job ${jobId}] Webhook JSON signal delivered successfully!`);
             } else {
-                console.log(`[Job ${jobId}] Streaming massive video back to n8n webhook (Warning: Large files might crash with 502/Proxy limit)...`);
+                console.log(`[Job ${jobId}] Streaming massive video back to n8n webhook...`);
                 const fileStream = fs.createReadStream(currentVideo);
                 await axios.post(webhookUrl, fileStream, {
                     headers: { 'Content-Type': 'video/mp4' },
