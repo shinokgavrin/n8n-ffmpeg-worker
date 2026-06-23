@@ -334,7 +334,12 @@ async function processQueue() {
                 complexFilters.push(`${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=first:dropout_transition=0[mixed_audio]`);
                 outputOptions.push('-map [mixed_audio]');
             } else {
-                outputOptions.push(`-map ${hostAudioNode}`);
+                // 🔥 BUG FIX: Если аудио не обрабатывается фильтрами (Pass 1+), мапим сырой 0:a БЕЗ квадратных скобок!
+                if (hostAudioNode === '[0:a]') {
+                    outputOptions.push('-map 0:a');
+                } else {
+                    outputOptions.push(`-map ${hostAudioNode}`);
+                }
             }
 
             // 6. VIDEO ROUTING: Chain Graphic Overlays
